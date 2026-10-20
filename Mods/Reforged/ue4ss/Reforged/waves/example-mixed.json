@@ -1,0 +1,10 @@
+{
+  "formatVersion": 1,
+  "name": "example-mixed",
+  "steps": [
+    { "atSeconds": 0,  "door": 2, "proto": "OrcMedium", "count": 2 },
+    { "atSeconds": 12, "door": 3, "proto": "OrcHeavy",  "count": 1 },
+    { "atSeconds": 24, "door": 4, "proto": "OrcLight",  "count": 3 },
+    { "atSeconds": 36, "door": 2, "proto": "Kobold",    "count": 1 }
+  ]
+}

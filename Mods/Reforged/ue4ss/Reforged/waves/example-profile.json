@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "name": "example-profile",
+  "breakSeconds": 8,
+  "waves": [
+    {
+      "steps": [
+        {
+          "atSeconds": 0,
+          "door": 2,
+          "proto": "OrcLight",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "atSeconds": 0,
+          "door": 2,
+          "proto": "OrcMedium",
+          "count": 2
+        },
+        {
+          "atSeconds": 12,
+          "door": 3,
+          "proto": "OrcHeavy",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "atSeconds": 0,
+          "door": 4,
+          "proto": "Kobold",
+          "count": 3
+        }
+      ]
+    }
+  ]
+}
