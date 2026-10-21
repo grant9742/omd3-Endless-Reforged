@@ -31,6 +31,9 @@ rmdir "%WIN%\Mods\Reforged\waves" 2>nul
 rmdir "%WIN%\Mods\Reforged" 2>nul
 rmdir "%WIN%\Mods" 2>nul
 
+rem Remove the pak folder only when it is empty. The pak lines use ..\..\Content\Paks\Mods\ (relative to WIN).
+rmdir "%WIN%\..\..\Content\Paks\Mods" 2>nul
+
 echo Removed. The mod settings in Mods\Reforged stay if the folder is not empty.
 goto done
 

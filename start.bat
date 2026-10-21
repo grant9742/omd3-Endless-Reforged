@@ -12,6 +12,7 @@ echo(%cmdcmdline%| find /i "%~nx0" >nul && set "DBLCLICK=1"
 if defined OMD3_NO_PAUSE set "DBLCLICK="
 cd /d "%~dp0"
 set "SRC=Mods\Reforged\ue4ss\Reforged"
+set "PAKSRC=Mods\Reforged\paks"
 set "U=vendor\UE4SS"
 
 call :findgame
@@ -57,6 +58,8 @@ for %%f in (%SRC%\Scripts\*.lua) do >> "%WIN%\.reforged-manifest" echo ue4ss/Mod
 >> "%WIN%\.reforged-manifest" echo ue4ss/Mods/Reforged/Scripts/reforged_gate.dll
 >> "%WIN%\.reforged-manifest" echo ue4ss/Mods/Reforged/Scripts/reforged_gate.log
 if exist "%SRC%\waves\*.json" for %%f in (%SRC%\waves\*.json) do >> "%WIN%\.reforged-manifest" echo Mods/Reforged/waves/%%~nxf
+rem Packs (#93): each Mods\Reforged\paks\*.pak goes to OMD\Content\Paks\Mods\. The manifest path is relative to WIN.
+if exist "%PAKSRC%\*.pak" for %%f in (%PAKSRC%\*.pak) do >> "%WIN%\.reforged-manifest" echo ../../Content/Paks/Mods/%%~nxf
 copy /y "%U%\dwmapi.dll" "%WIN%\dwmapi.dll" >nul
 xcopy /e /i /y "%U%\ue4ss" "%WIN%\ue4ss" >nul
 mkdir "%WIN%\ue4ss\Mods\Reforged\Scripts" 2>nul
@@ -65,6 +68,8 @@ copy /y "%SRC%\Scripts\*.lua" "%WIN%\ue4ss\Mods\Reforged\Scripts\" >nul
 copy /y "%SRC%\Scripts\reforged_gate.dll" "%WIN%\ue4ss\Mods\Reforged\Scripts\" >nul
 mkdir "%WIN%\Mods\Reforged\waves" 2>nul
 if exist "%SRC%\waves\*.json" copy /y "%SRC%\waves\*.json" "%WIN%\Mods\Reforged\waves\" >nul
+if exist "%PAKSRC%\*.pak" mkdir "%WIN%\..\..\Content\Paks\Mods" 2>nul
+if exist "%PAKSRC%\*.pak" copy /y "%PAKSRC%\*.pak" "%WIN%\..\..\Content\Paks\Mods\" >nul
 echo Installed. Manifest: %WIN%\.reforged-manifest
 echo Start the game. The mod loads at the next game start.
 tasklist /FI "IMAGENAME eq OMD-Win64-Shipping.exe" 2>nul | find /i "OMD-Win64-Shipping.exe" >nul

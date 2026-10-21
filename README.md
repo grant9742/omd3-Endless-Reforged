@@ -1,6 +1,6 @@
 # Endless Reforged: a rebuilt Endless mode for Orcs Must Die! 3
 
-**Version 0.1.0** · single-player · tested on Linux with Steam Proton
+**Version 0.2.0** · single-player · tested on Linux with Steam Proton
 
 Endless Reforged is a mod for *Orcs Must Die! 3* (Steam App ID 1522820). It adds a new
 Endless mode next to the stock one. In Reforged Endless, the mod builds every
@@ -11,9 +11,11 @@ game's Options menu.
 The stock Endless mode stays available as **Classic**. Classic plays like the
 unmodded game unless you turn on a Reforged option for it.
 
-The mod runs as a Lua script under [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS).
-It does not change the game executable or the game's PAK files. The uninstall
-removes every file that the install added.
+The mod runs as Lua scripts and a small native helper (`reforged_gate.dll`) under
+[UE4SS](https://github.com/UE4SS-RE/RE-UE4SS). It also adds three pak files to
+`OMD/Content/Paks/Mods/`: the two extra maps and the Endless map list rows. It does
+not change the game executable or the game's own PAK files. The uninstall removes
+every file that the install added.
 
 ## Features
 
@@ -33,6 +35,20 @@ new Rift. You respawn at that place. Stand on the ground when you press it.
 Press **F6** in the Endless map screen to change the mode. The screen shows the
 current mode. The mod applies it when the next map loads. When a map loads, a
 short popup shows the mode, for example `REFORGED ENDLESS`.
+
+### More maps in the Endless map list
+
+The Endless map list has more maps while the mod is installed. They work in
+every Endless mode.
+
+| Maps | What they are |
+|---|---|
+| **Well That's Orcward** | A new map: one long corridor from the orc gate to the Rift. |
+| **Servant Entrance** | A Backrooms map. An orc has returned from the Backrooms with poorly drawn maps: this one is the layout of the *Orcs Must Die! 2* map. |
+| The 7 War Scenario maps | The stock War Scenario maps, as Endless maps. In Reforged they have a boss every 5 rounds and their own wave size. |
+
+All Endless maps are unlocked while the mod is installed. DLC maps still need
+their DLC.
 
 ### Wave modifiers
 
@@ -70,6 +86,14 @@ the Endless enemies.
 The main menu shows **Play** and **Options**. **Play** opens the Endless map
 list and starts the map that you pick.
 
+### Test mode
+
+Press **F7** in the Endless map screen to turn test mode on or off. With test
+mode on, the mode box shows `TEST MODE: ON`, and the level-load popup shows
+`TEST MODE`. In a match, test mode keeps the Rift points at 1000 and turns off
+the Go Breaks, so you can try traps and maps without losing. Test mode is off at
+every game start.
+
 ## Requirements
 
 - *Orcs Must Die! 3* from Steam, started once.
@@ -99,7 +123,7 @@ To remove the mod, close the game and run `Mods/Reforged/install.sh rollback --y
 |---|---|---|
 | F6 | Endless map screen | Change the Endless mode (Classic, Reforged). |
 | F5 | Endless map screen | Turn wave modifiers on or off for the current mode. |
-| F7 | Endless map screen | Turn test mode on or off (see below). |
+| F7 | Endless map screen | Turn test mode on or off (see "Test mode"). |
 | F7 | In a match, before the first wave | Move the Rift to you. |
 | LB + RB | In a match, before the first wave | Move the Rift to you (controller). |
 | G | In a match | Start the next round (stock key). |
@@ -108,6 +132,12 @@ To remove the mod, close the game and run `Mods/Reforged/install.sh rollback --y
 
 - Tested only on Linux Mint 22 with Proton. Windows is not tested.
 - Single-player only.
+- No scores go to the leaderboards. The mod sets game integrity to 0 on every
+  map, so the game does not save best scores or upload leaderboard scores while
+  the mod is installed. Lifetime stats and achievements are not blocked.
+- DLC maps stay locked if you do not own the DLC.
+- The mod is made for Endless maps. If you turn off the start screen and play a
+  campaign War Scenario with the mode set to Reforged, the mod changes its waves too.
 - The first game start after an install or an update can crash. Start the
   game again.
 - The mod loads its scripts only when the game starts. Restart the game after

@@ -27,6 +27,7 @@ install)
     python3 "$M/check-lua.py" "$M/ue4ss/Reforged/Scripts/main.lua" || { echo "Lua syntax check failed; nothing copied"; exit 1; }
     python3 "$M/check-lua.py" "$M/ue4ss/Reforged/Scripts/modifiers.lua" || { echo "Lua syntax check failed; nothing copied"; exit 1; }
     python3 "$M/check-lua.py" "$M/ue4ss/Reforged/Scripts/stock_waves.lua" || { echo "Lua syntax check failed; nothing copied"; exit 1; }
+    python3 "$M/check-lua.py" "$M/ue4ss/Reforged/Scripts/custom_map.lua" || { echo "Lua syntax check failed; nothing copied"; exit 1; }
   else
     echo "lupa not installed: Lua syntax check skipped"
   fi
@@ -50,6 +51,13 @@ install)
     run rm -f "$MAN"
     prune_runtime_dirs
   fi
+  # TestMapProbe (#89) is no longer installed. An old install lists its files: remove them and their folders.
+  # The manifest is rewritten below, so its probe lines go with the old list.
+  if [ -f "$MAN" ] && grep -Fq 'ue4ss/Mods/TestMapProbe/' "$MAN"; then
+    echo "Old TestMapProbe install found. Removing its files."
+    while read -r f; do case "$f" in ue4ss/Mods/TestMapProbe/*) run rm -f "$WIN/$f" ;; esac; done < "$MAN"
+    run rmdir "$WIN/ue4ss/Mods/TestMapProbe/Scripts" "$WIN/ue4ss/Mods/TestMapProbe" 2>/dev/null || true
+  fi
   # A UE4SS.log symlink is a test leftover. A regular UE4SS.log is never removed.
   if [ -L "$WIN/UE4SS.log" ]; then
     echo "Removing the UE4SS.log symlink (test leftover)."
@@ -60,9 +68,14 @@ install)
   while IFS= read -r f; do ue_files+=("${f#./}"); done < <(cd "$U/ue4ss" && find . -type f | LC_ALL=C sort)
   files=(dwmapi.dll)
   for f in "${ue_files[@]}"; do files+=("ue4ss/$f"); done
-  files+=("ue4ss/Mods/Reforged/enabled.txt" "ue4ss/Mods/Reforged/Scripts/main.lua" "ue4ss/Mods/Reforged/Scripts/modifiers.lua" "ue4ss/Mods/Reforged/Scripts/stock_waves.lua")
+  files+=("ue4ss/Mods/Reforged/enabled.txt" "ue4ss/Mods/Reforged/Scripts/main.lua" "ue4ss/Mods/Reforged/Scripts/modifiers.lua" "ue4ss/Mods/Reforged/Scripts/stock_waves.lua" "ue4ss/Mods/Reforged/Scripts/custom_map.lua")
   # The break gate DLL is copied. The log is only listed: the gate writes it at run time, so install does not create it.
   files+=("ue4ss/Mods/Reforged/Scripts/reforged_gate.dll" "ue4ss/Mods/Reforged/Scripts/reforged_gate.log")
+  # Packs (#93): every Mods/Reforged/paks/*.pak goes to OMD/Content/Paks/Mods/. The manifest path is relative to WIN.
+  paks=("$M"/paks/*.pak)
+  for p in "${paks[@]}"; do
+    [ -f "$p" ] && files+=("../../Content/Paks/Mods/$(basename "$p")")
+  done
   waves=("$M"/ue4ss/Reforged/waves/*.json)
   for w in "${waves[@]}"; do
     [ -f "$w" ] && files+=("Mods/Reforged/waves/$(basename "$w")")
@@ -86,8 +99,15 @@ install)
   run cp "$M/ue4ss/Reforged/Scripts/main.lua" "$WIN/ue4ss/Mods/Reforged/Scripts/main.lua"
   run cp "$M/ue4ss/Reforged/Scripts/modifiers.lua" "$WIN/ue4ss/Mods/Reforged/Scripts/modifiers.lua"
   run cp "$M/ue4ss/Reforged/Scripts/stock_waves.lua" "$WIN/ue4ss/Mods/Reforged/Scripts/stock_waves.lua"
+  run cp "$M/ue4ss/Reforged/Scripts/custom_map.lua" "$WIN/ue4ss/Mods/Reforged/Scripts/custom_map.lua"
   run cp "$M/ue4ss/Reforged/Scripts/reforged_gate.dll" "$WIN/ue4ss/Mods/Reforged/Scripts/reforged_gate.dll"
-  for w in "${waves[@]}"; do [ -f "$w" ] && run cp "$w" "$WIN/Mods/Reforged/waves/$(basename "$w")"; done ;;
+  for w in "${waves[@]}"; do [ -f "$w" ] && run cp "$w" "$WIN/Mods/Reforged/waves/$(basename "$w")"; done
+  for p in "${paks[@]}"; do
+    if [ -f "$p" ]; then
+      run mkdir -p "$PAKS"
+      run cp "$p" "$PAKS/$(basename "$p")"
+    fi
+  done ;;
 rollback)
   [ -f "$MAN" ] || { echo "no manifest, nothing to roll back"; exit 1; }
   remove_listed "$MAN"

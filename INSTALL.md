@@ -1,12 +1,16 @@
-# Install Endless Reforged 0.1.0
+# Install Endless Reforged 0.2.0
 
 **Tested on:** Linux Mint 22, Steam Proton Experimental, game build RobotUE4
 4.27.1, single-player Endless. **Windows is not tested.**
 
-The install adds files under the game folder `OMD/Binaries/Win64/`. It writes a
-list of every file it adds to `.reforged-manifest` in that folder. The uninstall
-deletes exactly those files. The install does not change the game executable or
-the game's PAK files.
+The install adds files under the game folder `OMD/Binaries/Win64/` and three pak
+files under `OMD/Content/Paks/Mods/` (the two extra maps and the Endless map list
+rows). It writes a list of every file it adds to `.reforged-manifest` in
+`OMD/Binaries/Win64/`. The uninstall deletes exactly those files. The install
+does not change the game executable or the game's own PAK files.
+
+The mod blocks leaderboard score uploads: it sets game integrity to 0 on every
+map. The game does not save best scores while the mod is installed.
 
 ## Before you start
 
@@ -49,6 +53,9 @@ top folder of the Endless Reforged release.
 
 Optional: with the Python package `lupa` installed (`pip install --user lupa`),
 the installer checks the Lua files for syntax errors before it copies them.
+
+The install copies the three pak files from `Mods/Reforged/paks/` to
+`OMD/Content/Paks/Mods/` and lists them in the manifest with the other files.
 
 If a copy fails, run the install command again. It continues from the manifest.
 The installer does not overwrite a `dwmapi.dll` that it did not install. If you
@@ -95,9 +102,11 @@ To update, run `start.bat` again. To remove the mod, double-click
    | `Mods\Reforged\ue4ss\Reforged\Scripts\main.lua` | `ue4ss\Mods\Reforged\Scripts\main.lua` |
    | `Mods\Reforged\ue4ss\Reforged\Scripts\modifiers.lua` | `ue4ss\Mods\Reforged\Scripts\modifiers.lua` |
    | `Mods\Reforged\ue4ss\Reforged\Scripts\stock_waves.lua` | `ue4ss\Mods\Reforged\Scripts\stock_waves.lua` |
+   | `Mods\Reforged\ue4ss\Reforged\Scripts\custom_map.lua` (custom maps such as Well That's Orcward) | `ue4ss\Mods\Reforged\Scripts\custom_map.lua` |
    | `Mods\Reforged\ue4ss\Reforged\Scripts\reforged_gate.dll` (Reforged break gate, native helper loaded by the Lua mod) | `ue4ss\Mods\Reforged\Scripts\reforged_gate.dll` |
    | Not in the release (written by the gate at run time) | `ue4ss\Mods\Reforged\Scripts\reforged_gate.log` |
    | `Mods\Reforged\ue4ss\Reforged\waves\*.json` | `Mods\Reforged\waves\` |
+   | `Mods\Reforged\paks\*.pak` (three packs: `zz_ReforgedWarScenarios_P.pak` adds the War Scenario and custom-map rows to the Endless list; `zz_WellThatsOrcward_P.pak` and `zz_ServantEntrance_P.pak` are the custom maps) | `..\..\Content\Paks\Mods\` (the folder `OMD\Content\Paks\Mods\`) |
 
 3. Make the empty folder `OMD\Binaries\Win64\Mods\Reforged\` if it does not exist.
    The mod saves its settings there.
@@ -106,7 +115,9 @@ To update, run `start.bat` again. To remove the mod, double-click
 Windows does not need the Steam launch option.
 
 To remove the mod on Windows, delete the files and folders in the table, and
-the folder `OMD\Binaries\Win64\Mods\Reforged\`.
+the folder `OMD\Binaries\Win64\Mods\Reforged\`. Delete the three Reforged pak files
+(`zz_ReforgedWarScenarios_P.pak`, `zz_WellThatsOrcward_P.pak`, `zz_ServantEntrance_P.pak`)
+from `OMD\Content\Paks\Mods\`. Delete that folder only if it is empty.
 
 ## Update
 
@@ -130,7 +141,8 @@ Your settings stay in `OMD/Binaries/Win64/Mods/Reforged/settings.json`.
 3. Remove the Steam launch option.
 
 The uninstall keeps the files that the mod writes while it runs: `settings.json`,
-`endless-mode.txt` and `ue4ss/UE4SS.log`. To remove them too,
+`settings.json.bad` (only after a bad settings file), `endless-mode.txt`,
+`watch.jsonl`, `watch.prev.jsonl` and `ue4ss/UE4SS.log`. To remove them too,
 delete the folder `OMD/Binaries/Win64/Mods/Reforged/` and the file
 `OMD/Binaries/Win64/ue4ss/UE4SS.log`.
 

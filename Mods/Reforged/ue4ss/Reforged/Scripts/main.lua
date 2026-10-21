@@ -565,7 +565,24 @@ PLACEMENT_STATIC = {
   Scenario_Ice_03 = { MobSpawnerDoor1 = "door-not-opened", MobSpawnerDoor2 = "door-not-opened" },
   Scenario_Sand_05 = { MobSpawnerDoor3 = "flyer-door" },
   Scenario_17 = { BP_OMDAISpawner_2 = "crash-2026-10-12" },
+  -- Scenario_18 (Order Temple, #101): the coordinator opens these Vorwick rift spawners itself (OpenRedRift actions). They have no door.
+  Scenario_18 = {
+    ["OMDAISpawner4-RedRift1"] = "rift-spawner",
+    ["OMDAISpawner5-RedRift2"] = "rift-spawner",
+    ["OMDAISpawner6-RedRift3"] = "rift-spawner",
+    ["OMDAISpawner7-RedRift4"] = "rift-spawner",
+    ["OMDAISpawner8-RedRift5"] = "rift-spawner",
+    ["OMDAISpawner9-RedRift6"] = "rift-spawner",
+    ["OMDAISpawner10-RedRift7"] = "rift-spawner",
+    ["OMDAISpawner11-RedRift8"] = "rift-spawner",
+    ["OMDAISpawner12-RedRift9"] = "rift-spawner",
+    ["OMDAISpawner13-RedRift10"] = "rift-spawner",
+    ["OMDAISpawner14-RedRift11"] = "rift-spawner",
+  },
 }
+
+-- Levels whose BP_Door_Forcefield doors are ground doors (War Scenario maps, #101). DoorUsable does not give "flyer-door" there.
+PLACEMENT_GROUND_FORCEFIELD = { Scenario_06 = true, Scenario_09 = true, Scenario_12 = true, Scenario_15 = true, Scenario_18 = true, ScenarioDLC_03 = true, Scenario_Sand_03 = true }
 
 -- SpawnerLevelAndName(spawner) -> level, actor name, or nil, nil when the full name does not match.
 -- Full name example: "BP_OMDAISpawner_C /Game/Maps/CampaignDLC/ScenarioDLC_01/ScenarioDLC_01.ScenarioDLC_01:PersistentLevel.MobSpawnerDoor3"
@@ -609,7 +626,9 @@ function DoorUsable(spawner)
   else
     if not door then return false, "no-door" end
     local okN, doorName = pcall(function() return door:GetFullName() end)
-    if okN and tostring(doorName):find("BP_Door_Forcefield", 1, true) then return false, "flyer-door" end
+    if okN and tostring(doorName):find("BP_Door_Forcefield", 1, true) and not (level and PLACEMENT_GROUND_FORCEFIELD[level]) then
+      return false, "flyer-door"
+    end
     if PLACEMENT_REQUIRE_OPEN then
       local okO, open = pcall(function() return door.bIsOpen end)
       if not okO or open == nil then return false, "open-unknown" end
@@ -805,12 +824,26 @@ do
     end
   end
 
+  -- Keeps the previous match (S3, #103). An existing watch.jsonl becomes watch.prev.jsonl before this game's first open.
+  -- Every read and write is in pcall. A failed rename leaves the old file where it is.
+  local function KeepPrevious(path)
+    local prev = (path:gsub("watch%.jsonl$", "watch.prev.jsonl"))
+    pcall(function()
+      local old = io.open(path, "r")
+      if not old then return end
+      old:close()
+      os.remove(prev)
+      os.rename(path, prev)
+    end)
+  end
+
   -- Opens watch.jsonl with mode "w" at the first event. A new path (a new game start) gives a new file and restarts n.
   local function OpenFile()
     local path = Path()
     if not path then return nil end
     if W.fh and W.path == path then return W.fh end
     if W.fh then pcall(function() W.fh:close() end); W.fh = nil end
+    if not W.keptPrev then W.keptPrev = true; KeepPrevious(path) end
     local fh, err = io.open(path, "w")
     if not fh then
       if not W.openWarned then
@@ -931,6 +964,76 @@ do
     return nil
   end
 
+  -- died cause (#103): `rift` when the pawn's last good position is within 400 units of a live OMDRift, else `kill`.
+  -- An unknown position gives `kill`. RiftList reads the rifts now, so a moved rift is measured where it stands.
+  local function DeathCause(x, y, z)
+    if IsOrigin(x, y, z) then return "kill" end
+    local okR, rifts = pcall(RiftList)
+    if not okR or type(rifts) ~= "table" then return "kill" end
+    for _, r in ipairs(rifts) do
+      local l = r.loc
+      if l then
+        local dx, dy, dz = l.X - x, l.Y - y, l.Z - z
+        if math.sqrt(dx * dx + dy * dy + dz * dz) <= 400 then return "rift" end
+      end
+    end
+    return "kill"
+  end
+
+  -- Track row hp and tg (#103). hp is GetHealth to 0.1. tg is the kind of Controller:GetEnemyActor():
+  -- 0 none, 1 the player pawn, 2 barricade or trap, 3 door, 4 other. nil when a read fails. Each read is in pcall.
+  -- The controller is the Controller property, else GetController() (the property read was not valid on a live
+  -- OrcLight, docs/game-thread-assert-research-2026-10-18.md). The first read error is printed once (W.tgErrLogged).
+  local function TrackReads(actor, playerAddr)
+    local hp, tg = nil, nil
+    local okH, h = pcall(function() return actor:GetHealth() end)
+    if okH and type(h) == "number" then hp = math.floor(h * 10 + 0.5) / 10 end
+    local okT, kind = pcall(function()
+      local ctrl = nil
+      local okP, cP = pcall(function() return actor.Controller end)
+      if okP and cP ~= nil then ctrl = cP end
+      if ctrl == nil then
+        local okG, cG = pcall(function() return actor:GetController() end)
+        if okG and cG ~= nil then ctrl = cG end
+      end
+      if ctrl == nil then error("no controller", 0) end
+      local target = ctrl:GetEnemyActor()
+      -- No target: nil, or a UE4SS wrapper that is not valid (live 2026-10-21). Both are 0.
+      if target == nil then return 0 end
+      local okV, valid = pcall(function() return target:IsValid() end)
+      if okV and valid ~= true then return 0 end
+      local addr = target:GetAddress()
+      if playerAddr ~= nil and addr == playerAddr then return 1 end
+      local full = target:GetFullName()
+      if type(full) ~= "string" then return 4 end
+      if full:find("Barricade") or full:find("Trap") then return 2 end
+      if full:find("Door") then return 3 end
+      return 4
+    end)
+    if okT then tg = kind
+    elseif not W.tgErrLogged then
+      W.tgErrLogged = true
+      print("[Reforged] watch tg read err=" .. tostring(kind))
+    end
+    return hp, tg
+  end
+
+  -- spawn inv (#103): the spawner's bInvulnerableOnSpawn. Read once per door, at its first spawn. nil when unreadable.
+  local function DoorInv(i)
+    if i == nil then return nil end
+    for _, d in ipairs(W.doors) do
+      if d.i == i then
+        if not d.invRead then
+          d.invRead = true
+          local okI, v = pcall(function() return d.actor.bInvulnerableOnSpawn end)
+          if okI and type(v) == "boolean" then d.inv = v end
+        end
+        return d.inv
+      end
+    end
+    return nil
+  end
+
   -- Level name from a full object name: the text after /Game/ up to the first ., then its last path part.
   -- Example: .../Maps/CampaignDLC_Ice/Scenario_Ice_03/Scenario_Ice_03.Scenario_Ice_03:... -> Scenario_Ice_03
   local function LevelFromFullName(full)
@@ -1009,6 +1112,8 @@ do
     if b.to == "combat" and W.phase ~= "combat" then pcall(ClassicModCombatStart) end
     -- The Reforged modifier banner of this round. Nothing is pending unless the plan hook rolled an id.
     if b.to == "combat" and W.phase ~= "combat" then pcall(ModBannerCombatStart) end
+    -- The War Scenario map boss of the Reforged round (#101 M5). Reforged only.
+    if b.to == "combat" and W.phase ~= "combat" and QueueBlockMode() == "reforged" then pcall(ReforgedMapBossCombatStart) end
     if b.to ~= W.phase or b.kind ~= W.brk then
       WatchEmit("phase", {
         from = NV(W.phase), to = b.to, wave = NV(wave), iter = NV(iter),
@@ -1040,8 +1145,20 @@ do
     -- The match starts with diff. A wrong value is set again here, and diff2 is the read-back after that set.
     local diff2 = nil
     if diff ~= ENDLESS_DIFFICULTY then
-      pcall(SetEndlessDifficulty, "playable-fix")
-      diff2 = ReadGameDifficulty()
+      -- #100 items 5.2: a custom map in Classic keeps the borrowed difficulty. The native end-game needs a mode byte other than 3.
+      local okK, keep = pcall(function()
+        local lib = REFORGED_CUSTOM and REFORGED_CUSTOM.lib
+        if not lib or type(lib.KeepsBorrowedDifficulty) ~= "function" then return false end
+        local ws = FindFirstOf("WorldSettings")
+        if not ws or not ws:IsValid() then return false end
+        return lib.KeepsBorrowedDifficulty(ws:GetFullName(), ENDLESS_MODE) == true
+      end)
+      if okK and keep == true then
+        print("[Reforged] difficulty at playable=" .. tostring(diff) .. " kept (custom map, classic)")
+      else
+        pcall(SetEndlessDifficulty, "playable-fix")
+        diff2 = ReadGameDifficulty()
+      end
     end
     local dmRead = DmEndlessRead() or {}
     -- The level-load popup names the mode. It runs before the playable event, which carries its title.
@@ -1150,6 +1267,8 @@ do
     end)
   end
 
+  local EnemyHit -- defined after HitsBody (ehit, #103)
+
   -- The hook body. `self` and the parameters are read here, during the call, and nowhere after it.
   local function HitsBody(h, self, ...)
     if not WATCH_HITS or not WATCH_ON then return end
@@ -1169,7 +1288,11 @@ do
     local victim = nil
     pcall(function() victim = obj:GetAddress() end)
     HitsPlayerTick() -- at most one player read per second
-    if victim == nil or victim ~= HITS.victimAddr then return end -- player victims only
+    if victim == nil then return end
+    if victim ~= HITS.victimAddr then
+      EnemyHit(h, obj, get, dmg) -- ehit: a counted pawn victim. Other victims give nothing.
+      return
+    end -- player victims only below
     HITS.matched = HITS.matched + 1
     local hpNow, hpMax = nil, nil
     pcall(function() hpNow = Num(obj:GetHealth()) end)
@@ -1217,6 +1340,76 @@ do
     end
   end
 
+  -- ehit (#103): damage to a counted pawn (W.pawns). Same hooks, same rate limit (HITS.rate) as hit.
+  -- h1 reads hpAfter after the health write. h2 reads it 100 ms later, from the pawn id (a copy), never from the parameter.
+  -- aKind: player (the causer or its Instigator is the player pawn), trap, pawn (a counted pawn), other.
+  local function EnemyKind(causer)
+    if not causer then return "other" end
+    local kind = "other"
+    pcall(function()
+      if not causer:IsValid() then return end
+      local addr = causer:GetAddress()
+      if HITS.victimAddr ~= nil and addr == HITS.victimAddr then kind = "player"; return end
+      local full = causer:GetFullName()
+      local cid = ObjTail(full)
+      if cid and W.pawns[cid] then kind = "pawn" end
+      if full:find("Trap") then kind = "trap" end
+      local inst = causer.Instigator
+      if inst and inst:IsValid() then
+        if HITS.victimAddr ~= nil and inst:GetAddress() == HITS.victimAddr then kind = "player"; return end
+        local iid = ObjTail(inst:GetFullName())
+        if kind == "other" and iid and W.pawns[iid] then kind = "pawn" end
+      end
+    end)
+    return kind
+  end
+
+  -- nodmg is 1 when hpAfter >= hpBefore (dmg > 0 is already true here). null when a health read failed.
+  local function EnemyFinish(fields, hpBefore, hpAfter)
+    local nodmg = nil
+    if hpBefore and hpAfter then nodmg = hpAfter >= hpBefore and 1 or 0 end
+    fields.hpBefore, fields.hpAfter, fields.nodmg = NV(hpBefore), NV(hpAfter), NV(nodmg)
+    WatchEmit("ehit", fields)
+  end
+
+  function EnemyHit(h, obj, get, dmg)
+    local full = nil
+    pcall(function() full = obj:GetFullName() end)
+    local id = full and ObjTail(full)
+    local rec = id and W.pawns[id]
+    if not rec then return end
+    local sec = os.time()
+    if HITS.rate.sec ~= sec then HITS.rate.sec, HITS.rate.n = sec, 0 end
+    if HITS.rate.n >= HIT_RATE then HITS.drop = HITS.drop + 1; return end
+    HITS.rate.n = HITS.rate.n + 1
+    local hpNow = nil
+    pcall(function() hpNow = Num(obj:GetHealth()) end)
+    local dtype = nil
+    local dt = get(h.typeIdx)
+    pcall(function() if dt and dt:IsValid() then dtype = ObjTail(dt:GetFullName()) end end)
+    local fields = { src = h.src, pre = h.pre, id = id, proto = NV(rec.proto), dmg = dmg,
+      aKind = EnemyKind(get(h.causerIdx)), dmgType = NV(dtype) }
+    if h.pre == 0 then
+      -- h1 runs after the health write: hpBefore is hpAfter + dmg.
+      EnemyFinish(fields, hpNow and hpNow + dmg or nil, hpNow)
+    else
+      -- h2 runs before the write. The copies are the only values the deferred step uses.
+      local hpBefore = hpNow
+      WatchHitsDefer(100, function()
+        ExecuteInGameThread(function()
+          local hpAfter = nil
+          for _, e in ipairs(LiveNonWispAI()) do
+            if ObjTail(e.full) == id then
+              pcall(function() hpAfter = Num(e.actor:GetHealth()) end)
+              break
+            end
+          end
+          EnemyFinish(fields, hpBefore, hpAfter)
+        end)
+      end)
+    end
+  end
+
   local function HitsHook(h)
     return function(self, ...)
       if not WATCH_HITS then return end
@@ -1257,6 +1450,8 @@ do
   -- One diff pass. Runs every 500 ms while the watch is on. The tick and track events run on every 2nd pass (1 s).
   local function Pass()
     W.pass = W.pass + 1
+    local okDoor, errDoor = pcall(WatchDoorsScan) -- #103 C2: door events, before the rest of the pass
+    if not okDoor then WatchErr(WatchErrText(errDoor), "door") end
     if WATCH_HITS then HitsPlayerTick() end
     Start()
     local list = LiveNonWispAI()
@@ -1290,11 +1485,12 @@ do
           WatchEmit("spawn", {
             id = id, class = cls, proto = NV(proto), x = NV(x), y = NV(y), z = NV(z),
             door = NV(door), doorDist = NV(doorDist), counted = NV(counted), coordRaw = NV(raw),
-            health = NV(Health(e.actor)), speed = NV(okSp and spd or nil),
+            health = NV(Health(e.actor)), speed = NV(okSp and spd or nil), inv = NV(DoorInv(door)),
           })
         end
         if dead and not rec.dead then
-          WatchEmit("died", { id = id, x = NV(rec.x), y = NV(rec.y), z = NV(rec.z), life = now - rec.born, health = NV(Health(e.actor)) })
+          WatchEmit("died", { id = id, x = NV(rec.x), y = NV(rec.y), z = NV(rec.z), life = now - rec.born, health = NV(Health(e.actor)),
+            cause = DeathCause(rec.x, rec.y, rec.z) })
         end
         rec.dead = dead
       end
@@ -1349,10 +1545,12 @@ do
       -- A health of 0 or less counts as dead. ppawn is true when PlayerPawn() gives a pawn.
       -- W.pdead and W.ppawn keep the last value. A player event fires only when a value changes.
       local php, pdead, ppawn = nil, false, false
+      local pxT, pyT, pzT = nil, nil, nil -- player location for the tick (#103)
       do
         local pp = PlayerPawn()
         if pp then
           ppawn = true
+          pxT, pyT, pzT = Pos(pp)
           local okH, h = pcall(function() return pp:GetHealth() end)
           if okH and type(h) == "number" then php = h end
           pdead = IsDead(pp)
@@ -1388,8 +1586,20 @@ do
             pcall(function() riftE = gsE.RiftPoints end)
             local okM, modeE = pcall(QueueBlockMode)
             if not okM then modeE = nil end
-            WatchEmit("game-end", { rift = NV(riftE), wave = NV(wave), mode = NV(modeE) })
-            print("[Reforged] game-end rift=" .. tostring(riftE) .. " wave=" .. tostring(wave) .. " mode=" .. tostring(modeE))
+            -- won is the native bDidWin flag. nil when the read fails or is not a boolean.
+            local wonE = nil
+            pcall(function() wonE = gsE.bDidWin end)
+            if type(wonE) ~= "boolean" then wonE = nil end
+            -- integrity is read only (#102). nil when the instance or the read is missing.
+            local integE = nil
+            pcall(function()
+              local giE = ScoreBlockInstance()
+              if giE then integE = giE:GetGameIntegrity() end
+            end)
+            if type(integE) ~= "number" then integE = nil end
+            WatchEmit("game-end", { rift = NV(riftE), wave = NV(wave), mode = NV(modeE), won = NV(wonE), integrity = NV(integE) })
+            print("[Reforged] game-end rift=" .. tostring(riftE) .. " wave=" .. tostring(wave) .. " mode=" .. tostring(modeE)
+              .. " won=" .. tostring(wonE) .. " integrity=" .. tostring(integE))
           end
         end
       end
@@ -1406,14 +1616,24 @@ do
         gtq = #GT_QUEUE, gtlate = GT_STATS.late,
         hitseen = WATCH_HITS and NV(HITS.seen) or nil, hitmatch = WATCH_HITS and NV(HITS.matched) or nil,
         php = NV(php), pdead = pdead, ppawn = ppawn,
+        px = Round(pxT), py = Round(pyT), pz = Round(pzT),
       }))
     end
     if WATCH_TRACK_MS > 0 then
       local every = math.max(1, math.floor(WATCH_TRACK_MS / 500 + 0.5))
       if W.pass % every == 0 then
         local p = List({})
+        -- hp and tg are read for the pawns of this pass's live list. A pawn missing from the list gives null.
+        local byId, pAddr = {}, nil
+        for _, e in ipairs(list) do
+          byId[e.full:match("%.([^%.%s]+)$") or ShortName(e.full)] = e.actor
+        end
+        local pp = PlayerPawn()
+        if pp then pcall(function() pAddr = pp:GetAddress() end) end
         for _, rec in pairs(W.pawns) do
-          p[#p + 1] = { rec.id, Round(rec.x), Round(rec.y), Round(rec.z), rec.dead and 1 or 0 }
+          local hp, tg = nil, nil
+          if byId[rec.id] then hp, tg = TrackReads(byId[rec.id], pAddr) end
+          p[#p + 1] = { rec.id, Round(rec.x), Round(rec.y), Round(rec.z), rec.dead and 1 or 0, NV(hp), NV(tg) }
         end
         WatchEmit("track", { p = p })
       end
@@ -1475,6 +1695,7 @@ do
         doors[#doors + 1] = d
       end
       W.doors, W.pawns, W.doorsSent = doors, {}, false
+      W.doorEv = {} -- #103 C2: the door event state starts over on a new map
       local fields = { level = NV(level), doors = DoorList() }
       -- The mode at map ready (MapReadyFor applied it first). The state line reads it from here.
       local okMd, md = pcall(QueueBlockMode)
@@ -1489,6 +1710,64 @@ do
   function WatchMapLeave()
     for _, d in ipairs(W.doors) do d.actor = nil end
     W.doorsSent = true
+  end
+
+  -- #103 C2: a door event is due when no door event went out for this door in an earlier pass. A pass is 500 ms, so a
+  -- door sends at most one event per 0.5 s. Pure: no game read.
+  function WatchDoorEventDue(lastPass, pass)
+    return lastPass == nil or pass > lastPass
+  end
+
+  -- #103 C2: the door number of a door at x, y, z is the indexInLevel of the nearest spawner in W.doors. nil when none.
+  function WatchDoorNumber(x, y, z)
+    if x == nil then return nil end
+    local best, bestD = nil, nil
+    for _, sp in ipairs(W.doors) do
+      if sp.x ~= nil and sp.i ~= nil then
+        local dx, dy, dz = sp.x - x, sp.y - y, sp.z - z
+        local dd = dx * dx + dy * dy + dz * dz
+        if bestD == nil or dd < bestD then best, bestD = sp.i, dd end
+      end
+    end
+    return best
+  end
+
+  -- #103 C2: reads each door of the preview door classes (all maps). Writes a door event at first sight and when Health
+  -- or bIsOpen changes, at most once per pass. Reads only, every game read in pcall. max is GetMaxHealth, else the first
+  -- Health read. open is 1 or 0.
+  function WatchDoorsScan()
+    W.doorEv = W.doorEv or {}
+    local seen = {}
+    for _, cls in ipairs(REFORGED_PREVIEW_DOOR_CLASSES) do
+      local okF, found = pcall(FindAllOf, cls)
+      for _, d in ipairs((okF and found) or {}) do
+        local okV, valid = pcall(function() return d:IsValid() end)
+        local okN, full = pcall(function() return d:GetFullName() end)
+        if okV and valid == true and okN and type(full) == "string" and not seen[full] then
+          seen[full] = true
+          local hp, open = nil, nil
+          pcall(function() hp = d.Health end)
+          pcall(function() open = d.bIsOpen end)
+          if type(hp) ~= "number" then hp = nil end
+          if type(open) ~= "boolean" then open = nil end
+          local openN = nil
+          if open ~= nil then openN = open and 1 or 0 end
+          local rec = W.doorEv[full]
+          if rec == nil then
+            rec = { seen = false }
+            pcall(function() rec.max = d:GetMaxHealth() end)
+            if type(rec.max) ~= "number" then rec.max = hp end
+            W.doorEv[full] = rec
+          end
+          local changed = not rec.seen or rec.hp ~= hp or rec.open ~= openN
+          if (hp ~= nil or openN ~= nil) and changed and WatchDoorEventDue(rec.lastPass, W.pass) then
+            local x, y, z = Pos(d)
+            WatchEmit("door", { i = NV(WatchDoorNumber(x, y, z)), hp = NV(hp), max = NV(rec.max), open = NV(openN) })
+            rec.seen, rec.hp, rec.open, rec.lastPass = true, hp, openN, W.pass
+          end
+        end
+      end
+    end
   end
 
   -- Counted marker: raw Int64 at +0x848 on OMDAICharacter. Read only as a raw value, never as an object.
@@ -2365,8 +2644,26 @@ function PaceHold(what, count, repeatCall, force)
   return true
 end
 -- One release check. Called once per pass from the hoard release loop, after TickHoldAutoStep.
+-- True in Reforged when OMDGameState:GetIsGameEnded reads true (#103 F2). A failed read is not ended. Each read is in pcall.
+function PaceGameEnded()
+  if QueueBlockMode() ~= "reforged" then return false end
+  local okG, ended = pcall(function()
+    local gs = FindFirstOf("OMDGameState")
+    if not gs or not gs:IsValid() then return nil end
+    return gs:GetIsGameEnded()
+  end)
+  return okG and ended == true
+end
 function PaceStep()
   if #PACE_QUEUE == 0 then return end
+  -- After the game end the pacer releases nothing (#103 F2). The queue is kept. One line per match.
+  if PaceGameEnded() then
+    if not PACE.endNoted then
+      PACE.endNoted = true
+      print(string.format("[Reforged] spawn pace stopped: game ended held=%d", #PACE_QUEUE))
+    end
+    return
+  end
   -- A timed break keeps the queued calls until its countdown ends.
   if ReforgedTimedWait() then return end
   local head = PACE_QUEUE[1]
@@ -2619,7 +2916,7 @@ local function DoorSpawn(doorIndex, row, count)
               end
               -- A boss pawn of a Reforged boss round is kept for the coin reward on death.
               local bossK = row.bossK
-              if bossK == nil and ReforgedIsBossName(row.name) then bossK = math.max(1, math.floor(REFORGED.round / REFORGED_WAVES.bossEvery)) end
+              if bossK == nil and ReforgedIsBossName(row.name) then bossK = math.max(1, math.floor(REFORGED.round / ReforgedBossEvery())) end
               if bossK ~= nil then ReforgedBossRegister(e.actor, e.full, row.name, bossK) end
               -- A banner bearer is kept for the reinforcement calls of its door. Only in Reforged, or in Classic
               -- when the call comes from a Classic modifier (row.classicCfg is its reinforce block).
@@ -2802,6 +3099,30 @@ REFORGED_MAP_FAMILIES = {
   Scenario_Sand_05 = { "Lizardman", "Hellbat", "Orc" },
   Scenario_Sand_01 = { "Lizardman", "Orc", "Kobold", "Elemental" },
   Scenario_Sand_02 = { "Lizardman" },
+  -- War Scenario levels (#101): docs/war-scenario-map-families-2026-10-20.tsv, same 5% cut-off.
+  Scenario_06 = { "Orc", "Kobold" },
+  Scenario_09 = { "Orc", "Kobold", "Elemental" },
+  Scenario_15 = { "FireFiend", "Orc" },
+  Scenario_12 = { "Orc", "Kobold" },
+  Scenario_18 = { "Orc", "FireFiend", "Ogre" },
+  ScenarioDLC_03 = { "Hellbat", "Orc", "FireFiend" },
+  Scenario_Sand_03 = { "Lizardman", "Orc", "FireFiend", "Hellbat" },
+}
+-- War Scenario map bosses (#101 M5). Level -> the coordinator action that makes the level script spawn its boss
+-- (DoOnslaughtAction). Source: OnslaughtAction calls at authored wave 5 (docs/war-scenario-endless-research-2026-10-20.md).
+REFORGED_MAP_BOSS = { Scenario_06 = "SpawnCragg", Scenario_09 = "SpawnGhorbash", Scenario_12 = "SpawnZelzadore", Scenario_15 = "SpawnMongrifel" }
+-- Boss rounds on a REFORGED_MAP_BOSS level: every 5 rounds (the stock cadence, user 2026-10-20). Other levels use bossEvery.
+REFORGED_MAP_BOSS_EVERY = 5
+-- Wave size factor per level: Classic mean wave / stock-map median (64.5). From `endless_extra_maps.py lua-size`.
+-- It multiplies ReforgedSize and ReforgedCap on that level. A level not listed has factor 1.
+REFORGED_MAP_SIZE = {
+  Scenario_06 = 4.18,
+  Scenario_09 = 4.14,
+  Scenario_15 = 3.64,
+  Scenario_12 = 5.43,
+  Scenario_18 = 3.85,
+  ScenarioDLC_03 = 3.87,
+  Scenario_Sand_03 = 4.28,
 }
 -- Catalog proto -> family. Every PROTOS name has one. LootGoblin is a Kobold with a flag (see above).
 REFORGED_PROTO_FAMILY = {
@@ -2853,16 +3174,30 @@ REFORGED_WARNED = {}
 -- ready is true only after MapReadyFor has set the seed for the current map. ReforgedStep builds no round until then.
 REFORGED = { round = 0, lastBuild = nil, seed = 0, last = nil, inBuild = nil, doorStart = 0, ready = false }
 
--- Cap for round r (from 1): capStart grown by capGrowthPercent per round, at most REFORGED_BUDGET.
+-- Wave size factor of the current level (REFORGED_MAP_SIZE). 1 when the level is not listed.
+function ReforgedSizeFactor()
+  return REFORGED_MAP_SIZE[REFORGED.level] or 1
+end
+-- Boss every N rounds: REFORGED_MAP_BOSS_EVERY on a map-boss level, else REFORGED_WAVES.bossEvery.
+function ReforgedBossEvery()
+  if REFORGED_MAP_BOSS[REFORGED.level] ~= nil then return REFORGED_MAP_BOSS_EVERY end
+  return REFORGED_WAVES.bossEvery
+end
+-- True when round r is a boss round of the current level.
+function ReforgedIsBossRound(r)
+  local e = ReforgedBossEvery()
+  return e ~= nil and e > 0 and r % e == 0
+end
+-- Cap for round r (from 1): capStart grown by capGrowthPercent per round, times the level size factor, at most REFORGED_BUDGET.
 function ReforgedCap(r)
-  local raw = math.floor(REFORGED_WAVES.capStart * (1 + REFORGED_WAVES.capGrowthPercent / 100) ^ (r - 1) + 0.5)
+  local raw = math.floor(REFORGED_WAVES.capStart * (1 + REFORGED_WAVES.capGrowthPercent / 100) ^ (r - 1) * ReforgedSizeFactor() + 0.5)
   if REFORGED_BUDGET ~= nil and raw > REFORGED_BUDGET then return REFORGED_BUDGET end
   return raw
 end
--- Pawns in round r: sizeBase, plus sizeStep per round, times REFORGED_SIZE_SCALE. At least 1.
+-- Pawns in round r: sizeBase, plus sizeStep per round, times REFORGED_SIZE_SCALE and the level size factor. At least 1.
 function ReforgedSize(r)
   local w = REFORGED_WAVES
-  return math.max(1, math.floor((w.sizeBase + w.sizeStep * (r - 1)) * REFORGED_SIZE_SCALE + 0.5))
+  return math.max(1, math.floor((w.sizeBase + w.sizeStep * (r - 1)) * REFORGED_SIZE_SCALE * ReforgedSizeFactor() + 0.5))
 end
 -- Promote percent: the promotePercent setting when it is a number, else promoteStep per round, at most promoteMax.
 function ReforgedPromote(r)
@@ -3019,16 +3354,23 @@ function ReforgedPlan(r, seed)
     return tr.protos[#tr.protos]
   end
   local entries, remaining = {}, size
-  if w.bossEvery and w.bossEvery > 0 and r % w.bossEvery == 0 then
+  -- Map boss (#101 M5): a War Scenario level with REFORGED_MAP_BOSS. Its boss is the level's own DoOnslaughtAction, not a catalog entry.
+  local mapBossAction = nil
+  if ReforgedIsBossRound(r) then
     local bosses = ReforgedNames(w.bosses, "boss")
-    if #bosses > 0 then
-      local boss = bosses[rng(#bosses)]
-      entries[1] = { proto = boss, count = 1, promote = promote, boss = true }
+    mapBossAction = REFORGED_MAP_BOSS[REFORGED.level]
+    if mapBossAction ~= nil or #bosses > 0 then
+      local boss = nil
+      if mapBossAction == nil then
+        boss = bosses[rng(#bosses)]
+        entries[1] = { proto = boss, count = 1, promote = promote, boss = true }
+      end
       remaining = remaining - 1
       -- Escort: one squad of the boss family. With no valid family, a T2 or T3 proto of this round.
       local escortMin = math.max(1, w.escortMin or 2)
       local escortMax = math.max(escortMin, w.escortMax or 6)
-      local family = ReforgedNames((w.escorts or {})[boss] or {}, "escort " .. boss)
+      local family = {}
+      if boss ~= nil then family = ReforgedNames((w.escorts or {})[boss] or {}, "escort " .. boss) end
       local escort = nil
       if #family > 0 then
         escort = family[rng(#family)]
@@ -3106,7 +3448,7 @@ function ReforgedPlan(r, seed)
     entries[#entries + 1] = { proto = proto, count = count, promote = promote }
     remaining = remaining - count
   end
-  local plan = { round = r, size = size, cap = cap, promote = promote, entries = entries }
+  local plan = { round = r, size = size, cap = cap, promote = promote, entries = entries, mapBoss = mapBossAction }
   if stockRows ~= nil then
     plan.source, plan.stockRound, plan.stockIter = "stock", stockW, stockI
   elseif REFORGED_STOCK.source == "stock" then
@@ -3114,12 +3456,14 @@ function ReforgedPlan(r, seed)
   end
   if type(REFORGED_PLAN_HOOK) == "function" then
     -- The hook gets a copy, so a hook that fails part way cannot change the plan.
-    local copy = { round = r, size = size, cap = cap, promote = promote, entries = {}, source = plan.source, stockRound = plan.stockRound, stockIter = plan.stockIter }
+    local copy = { round = r, size = size, cap = cap, promote = promote, entries = {}, source = plan.source, stockRound = plan.stockRound, stockIter = plan.stockIter, mapBoss = plan.mapBoss }
     for i, e in ipairs(entries) do copy.entries[i] = { proto = e.proto, count = e.count, promote = e.promote, boss = e.boss, door = e.door } end
     local okH, res = pcall(REFORGED_PLAN_HOOK, copy, { round = r, seed = seed, cap = cap, mode = "reforged" })
     if okH and type(res) == "table" then
       -- A returned plan with no source keeps the source of this plan.
       if res.source == nil then res.source, res.stockRound, res.stockIter = plan.source, plan.stockRound, plan.stockIter end
+      -- The map boss is kept too when the hook returns a plan without it.
+      if res.mapBoss == nil then res.mapBoss = plan.mapBoss end
       plan = res
     else
       print("[Reforged] reforged plan hook " .. (okH and "returned no table" or ("failed: " .. tostring(res))) .. ", plan kept")
@@ -3374,6 +3718,8 @@ function ReforgedBuildRound()
   local plan = ReforgedPlan(r, seed)
   REFORGED.last = plan
   REFORGED.lastBuild = os.time()
+  -- The map boss of this round fires at its combat start (ReforgedMapBossCombatStart). A new plan replaces an old pending one.
+  REFORGED.mapBossPending = plan.mapBoss and { round = r, action = plan.mapBoss } or nil
   REFORGED_GAP_MULT = tonumber(plan.gapMult) or 1
   REFORGED_REINFORCE = plan.reinforce
   SPAWN_CAP = plan.cap
@@ -3384,7 +3730,7 @@ function ReforgedBuildRound()
   local spawnOut = WatchList({})
   for i, e in ipairs(spawn) do spawnOut[i] = WatchList({ e.proto, e.count }) end
   WatchEmit("plan", { round = r, size = plan.size, cap = plan.cap, promote = plan.promote, seed = seed, level = REFORGED.level or WatchNull, entries = pairsOut, spawn = spawnOut,
-    source = plan.source or "generator", stockRound = plan.stockRound or WatchNull, stockIter = plan.stockIter or WatchNull })
+    source = plan.source or "generator", stockRound = plan.stockRound or WatchNull, stockIter = plan.stockIter or WatchNull, mapBoss = plan.mapBoss or WatchNull })
   print(string.format("[Reforged] reforged round=%d size=%d cap=%d entries=%d spawn=%d seed=%s", r, plan.size, plan.cap, #plan.entries, #spawn, tostring(seed)))
   local doors = GetSpawnerIndexes()
   local start = REFORGED.doorStart or 0
@@ -3417,7 +3763,7 @@ function ReforgedBuildRound()
       -- A boss call carries its boss round index k on a proxy row. The door sampler reads it to register the pawn.
       -- A bearer entry sets bearer on the same proxy row. The door sampler keeps the pawn.
       local proxy = {}
-      if e.boss == true then proxy.bossK = math.floor(r / REFORGED_WAVES.bossEvery) end
+      if e.boss == true then proxy.bossK = math.floor(r / ReforgedBossEvery()) end
       if e.bearer == true then proxy.bearer = true end
       row = setmetatable(proxy, { __index = row })
     end
@@ -3458,6 +3804,26 @@ function ReforgedStep()
   end
   if reason ~= "build-phase" or REFORGED.inBuild == true then return end
   if ReforgedBuildRound() then REFORGED.inBuild = true end
+end
+-- War Scenario map boss (#101 M5). Called at the combat start of a Reforged round (the phase changes into combat).
+-- Fires the pending round's map boss once through the coordinator, then clears it.
+function ReforgedMapBossCombatStart()
+  local p = REFORGED.mapBossPending
+  if p == nil then return end
+  REFORGED.mapBossPending = nil
+  local r, name = p.round, p.action
+  local c = coordinator()
+  local ok, err = false, "no-coordinator"
+  if c ~= nil then
+    local okC, errC = pcall(function() c:DoOnslaughtAction(name) end)
+    ok, err = okC, errC
+  end
+  if ok then
+    print(string.format("[Reforged] map-boss round=%s action=%s ok=true", tostring(r), tostring(name)))
+  else
+    print(string.format("[Reforged] map-boss round=%s action=%s ok=false err=%s", tostring(r), tostring(name), tostring(err)))
+  end
+  WatchEmit("mapboss", { round = r, action = name, ok = ok })
 end
 -- Adds round to a tick event when the saved mode is reforged. The other modes omit it.
 function ReforgedTickFields(fields)
@@ -5220,6 +5586,67 @@ end
 
 GameLoop(100, function() pcall(PadComboStep); return false end)
 
+-- Score uploads are blocked (#102). The mission score write and the best-score fields run only when game integrity is
+-- above 0.5. Integrity 0 blocks them. Lifetime stats and achievements are not blocked. There is no setting to turn it off.
+-- Globals, not locals: this chunk is near the 200-local limit.
+SCORE_BLOCK = { started = false }
+
+function ScoreBlockInstance()
+  local gi
+  pcall(function() gi = FindFirstOf("BP_OMDGameInstance_C") end)
+  local okV, validV = pcall(function() return gi ~= nil and gi:IsValid() end)
+  if okV and validV then return gi end
+  gi = nil
+  pcall(function() gi = FindFirstOf("OMDGameInstance") end)
+  okV, validV = pcall(function() return gi ~= nil and gi:IsValid() end)
+  if okV and validV then return gi end
+  return nil
+end
+
+-- Sets game integrity to 0 and reads it back on the game thread. Prints and emits score-block on every call.
+-- Returns true when the readback is 0.
+function NoScoreUpload(why)
+  local gi = ScoreBlockInstance()
+  local ok, integ, err = false, nil, nil
+  if not gi then
+    err = "game instance not found"
+  else
+    local okSet, setErr = pcall(function() gi:SetGameIntegrity(0.0) end)
+    local okGet, got = pcall(function() return gi:GetGameIntegrity() end)
+    if okGet then integ = got end
+    if not okSet then err = setErr elseif not okGet then err = got end
+    ok = okSet and okGet and type(integ) == "number" and integ == 0
+  end
+  local tail = " integrity=" .. tostring(integ) .. " ok=" .. tostring(ok)
+  if err ~= nil then tail = tail .. " err=" .. tostring(err) end
+  -- The startup retry prints and emits only when its result changes. Map-ready and other calls always print.
+  if why == "start" then
+    if tail == SCORE_BLOCK.lastStart then return ok end
+    SCORE_BLOCK.lastStart = tail
+  end
+  print("[Reforged] score-upload blocked why=" .. tostring(why) .. tail)
+  WatchEmit("score-block", { why = why, integrity = (integ == nil) and WatchNull or integ, ok = ok })
+  return ok
+end
+
+-- Startup: retry on the game-thread loop until the block applies once. No line is printed while the game instance is missing.
+-- #70: the loop gives up after 30 tries with an instance present. Map ready still calls NoScoreUpload.
+GameLoop(2000, function()
+  if SCORE_BLOCK.started or SCORE_BLOCK.gaveUp then return true end
+  if not ScoreBlockInstance() then return false end
+  SCORE_BLOCK.startTries = (SCORE_BLOCK.startTries or 0) + 1
+  if NoScoreUpload("start") then
+    SCORE_BLOCK.started = true
+    return true
+  end
+  if SCORE_BLOCK.startTries >= 30 then
+    SCORE_BLOCK.gaveUp = true
+    print("[Reforged] score-upload startup gave up tries=" .. tostring(SCORE_BLOCK.startTries))
+    return true
+  end
+  return false
+end)
+
 -- Map-ready work runs once for each level. The key is the coordinator address. "unknown" is the key when the
 -- address cannot be read. A nil key means no coordinator was seen since the last reset (menus), so the next level counts as new.
 -- MAP_READY.queued keeps one map-ready callback queued at a time (set on the loop thread).
@@ -5281,6 +5708,7 @@ do
     TICK_HOLD_AUTO_ON = false
     TICK_HOLD_UNTIL = 0
     PACE_QUEUE = {}
+    PACE.endNoted = nil -- the pace stop line is once per match (#103 F2)
     -- Held door calls belong to the previous map. Release would run them on this map.
     local droppedHeld = #HOARD_HELD
     HOARD_HELD = {}
@@ -5306,6 +5734,7 @@ do
     pcall(ClassicModMapReset)
     REFORGED.ready = true
     if MAP_READY.claim(c) then
+      pcall(NoScoreUpload, "map-ready")
       WatchMapReady(missionName)
       print("[Reforged] auto-test map ready mission-level=" .. tostring(missionName) .. " " .. population(c))
     end
@@ -5835,6 +6264,7 @@ local function WatchEndlessMap(gi)
           HOOK_TRACE = {}
           DOOR_PENDING = {}
           if MAP_READY.claim(c) then
+            pcall(NoScoreUpload, "map-ready")
             WatchMapReady(missionName)
             print("[Reforged] auto-test map ready mission-level=" .. tostring(missionName) .. " " .. population(c))
           end
@@ -5880,6 +6310,17 @@ do
     { row = "Scenario_Sand_05_End", guid = "25DE44F8-4739-183F-EF05-80BC4220B497", level = "Scenario_Sand_05", name = "Oasis Outpost" },
     { row = "Scenario_Sand_01_End", guid = "A8DBBA04-46DF-9EA2-1CA4-E9A2B46B1AB3", level = "Scenario_Sand_01", name = "Untrained Grounds" },
     { row = "Scenario_Sand_02_End", guid = "A9E7B7F3-45D4-A087-605E-48A7068963C6", level = "Scenario_Sand_02", name = "Sand Sea Castle" },
+    -- War Scenario maps (#101). Rows from Mods/Reforged/war-scenarios.tsv. The pak zz_ReforgedWarScenarios_P adds them to the game.
+    { row = "Scenario_06_WS_End", guid = "F7E1EB46-416B-5F24-8203-57F4152CB20D", level = "Scenario_06", name = "The Lava Pits" },
+    { row = "Scenario_09_WS_End", guid = "FA8A3837-0399-5E67-BA7B-30BF7308A9FE", level = "Scenario_09", name = "Front Lawn" },
+    { row = "Scenario_12_WS_End", guid = "A4DE6B98-DA12-5DD9-96CD-20E2D4A066AE", level = "Scenario_15", name = "Mage Tower" },
+    { row = "Scenario_15_WS_End", guid = "9BB56BAA-A145-53FD-AA7B-631D3E40D7A9", level = "Scenario_12", name = "Dragon Boneyard" },
+    { row = "Scenario_18_WS_End", guid = "8D8BD691-894E-5FF9-9FA4-2C062236020D", level = "Scenario_18", name = "Order Temple" },
+    { row = "DLCScenario_03_WS_End", guid = "16A1DA65-1E18-5C60-B632-442233E6F463", level = "ScenarioDLC_03", name = "Canyon Keep" },
+    { row = "Scenario_Sand_03_WS_End", guid = "4CAF6C6D-442D-57E0-9168-B4CA8E66CB27", level = "Scenario_Sand_03", name = "Desert Wall" },
+    -- Custom maps (#100, #102). Rows from Mods/Reforged/custom-map-rows.tsv. The level is the Test map (/Game/Maps/Test/<level>).
+    { row = "WellThatsOrcward_End", guid = "35AB4658-44C8-5E5D-B847-901217630F57", level = "WellThatsOrcward", name = "Well That's Orcward" },
+    { row = "ServantEntrance_End", guid = "B6232412-0A9F-584B-B16D-A87541EFE134", level = "ServantEntrance", name = "Servant Entrance" },
   }
 
   local function MissionByRow(row)
@@ -5887,6 +6328,35 @@ do
       if entry.row == row then return entry end
     end
     return nil
+  end
+
+  -- #102: a GUID word as an unsigned 32-bit integer, or nil when it is not a number.
+  local function WordOf(v)
+    if type(v) ~= "number" then return nil end
+    local i = math.tointeger(v)
+    return i and (i & 0xFFFFFFFF) or nil
+  end
+
+  -- True when the four words A, B, C, D of x and y are equal. A nil or unreadable value is not equal.
+  local function GuidWordsEqual(x, y)
+    if not x or not y then return false end
+    for _, k in ipairs({ "A", "B", "C", "D" }) do
+      local wx, wy = WordOf(x[k]), WordOf(y[k])
+      if not wx or not wy or wx ~= wy then return false end
+    end
+    return true
+  end
+
+  -- Text of a GUID for the log, 8-4-4-4-12 hex. "unreadable" when the value could not be read.
+  local function GuidWordsText(g)
+    if not g then return "unreadable" end
+    local hex = {}
+    for i, k in ipairs({ "A", "B", "C", "D" }) do
+      local w = WordOf(g[k])
+      hex[i] = w and string.format("%08X", w) or "nil"
+    end
+    local s = table.concat(hex)
+    return s:sub(1, 8) .. "-" .. s:sub(9, 12) .. "-" .. s:sub(13, 16) .. "-" .. s:sub(17, 20) .. "-" .. s:sub(21, 32)
   end
 
   -- Loads one Endless map by its mission row, through the stock campaign flow from the Endless hub.
@@ -5944,6 +6414,19 @@ do
         endlessStartRequested = false
         return
       end
+      -- #102: SetCurrentMission does nothing when the GUID is not in the campaign's MissionList, and it reports no error.
+      -- Read the current mission back. Launch only when it is the row that was asked for.
+      local okRead, current = pcall(function()
+        local g = gi.CurrentMission.Guid
+        return { A = g.A, B = g.B, C = g.C, D = g.D }
+      end)
+      if not okRead then current = nil end
+      if not GuidWordsEqual(current, mission.Guid) then
+        endlessStartRequested = false
+        print("[Reforged] launch rejected: mission not set row=" .. entry.row .. " current=" .. GuidWordsText(current))
+        return
+      end
+      print("[Reforged] launch mission set row=" .. entry.row .. " ok=true")
       local okLoad, loadErr = pcall(function() hub:Manual_SinglePlayer_LaunchGame() end)
       print(string.format("[Reforged] auto-test Manual_SinglePlayer_LaunchGame called=%s error=%s",
         tostring(okLoad), tostring(loadErr)))
@@ -7466,7 +7949,7 @@ end
 -- Developer commands: rejected unless TESTING is on.
 local DEV_OPS = {}
 for _, v in ipairs({ "class-props", "probe", "sweep", "feign", "distinct", "profile-run", "profile-stop",
-  "goblin-status", "goblin-coins", "goblin-hit", "coin-give", "spawn-center", "stat-sample", "tally", "tally-reset", "behavior", "bt-probe", "bt-probe-load", "ai-perf", "cvar", "pawn-flags", "pawn-strip", "pawn-collide", "coord-spawn-pos", "coord-queue", "proto-pass", "anchor-boot", "anchor-hold", "anchor-hold-mode", "anchor-release", "anchor-status", "anchor-health", "anchor-auto", "anchor-min-dist", "cspawn", "play-list", "queue-block", "tick-hold", "spawn-pace", "reforged-plan", "reforged-round", "reforged-round-next", "modifier", "dmg-probe", "break-mode", "break-order", "break-gate", "preview", "dm-list", "hurt-player", "wisp-probe", "wisp-clear", "moneybags-kill", "curve", "difficulty", "banner", "rift-move" }) do DEV_OPS[v] = true end
+  "goblin-status", "goblin-coins", "goblin-hit", "coin-give", "spawn-center", "stat-sample", "tally", "tally-reset", "behavior", "bt-probe", "bt-probe-load", "ai-perf", "cvar", "pawn-flags", "pawn-strip", "pawn-collide", "coord-spawn-pos", "coord-queue", "proto-pass", "anchor-boot", "anchor-hold", "anchor-hold-mode", "anchor-release", "anchor-status", "anchor-health", "anchor-auto", "anchor-min-dist", "cspawn", "play-list", "queue-block", "tick-hold", "spawn-pace", "reforged-plan", "reforged-round", "reforged-round-next", "modifier", "dmg-probe", "break-mode", "break-order", "break-gate", "preview", "dm-list", "hurt-player", "wisp-probe", "wisp-clear", "moneybags-kill", "curve", "difficulty", "banner", "rift-move", "look", "walk", "push", "watch-hits" }) do DEV_OPS[v] = true end
 
 local function SetTesting(on)
   if on and not TESTING then
@@ -7617,16 +8100,22 @@ end
 
 -- cvar <name> <value>: runs "<name> <value>" as a console command through KismetSystemLibrary.
 -- Developer command. Runs on the game thread. The fake test world has no KismetSystemLibrary, so ok=false there.
-local function CvarRun(name, value)
+-- ConsoleExec(text): runs one console command through KismetSystemLibrary. Returns ok, errText ("-" when ok).
+-- Global, not local: the main chunk is at its local limit. Game thread only. Used by cvar and by custom_map.lua (#93 M2).
+function ConsoleExec(text)
   local okRun, res = pcall(function()
     local k = PerfKismet()
     if not k then error("no KismetSystemLibrary", 0) end
     local ctx = coordinator() or FindFirstOf("PlayerController")
     if not ctx then error("no world context", 0) end
-    return k:ExecuteConsoleCommand(ctx, name .. " " .. value, nil)
+    return k:ExecuteConsoleCommand(ctx, text, nil)
   end)
   local ok = okRun and res ~= false
-  local errText = okRun and "-" or tostring(res)
+  return ok, okRun and "-" or tostring(res)
+end
+
+local function CvarRun(name, value)
+  local ok, errText = ConsoleExec(name .. " " .. value)
   print(string.format("[Reforged] cvar %s=%s ok=%s err=%s", name, value, tostring(ok), errText))
 end
 
@@ -8861,6 +9350,21 @@ do
   end
 end
 
+-- Reads an actor location for walk and push. Returns {X,Y,Z} or nil.
+function WalkReadLoc(pawn)
+  local okL, l = pcall(function() return pawn:K2_GetActorLocation() end)
+  if not okL or not l then return nil end
+  local okV, x, y, z = pcall(function() return l.X, l.Y, l.Z end)
+  if not okV or type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then return nil end
+  return { X = x, Y = y, Z = z }
+end
+
+-- Formats a location from WalkReadLoc as x,y,z in whole units.
+function WalkFormatLoc(l)
+  if not l then return "nil" end
+  return string.format("%.0f,%.0f,%.0f", l.X, l.Y, l.Z)
+end
+
 local function DispatchCommand(line)
   WatchEmit("cmd", { line = tostring(line) })
   local op, arg1, arg2, arg3 = line:match("^%s*(%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*$")
@@ -9206,6 +9710,23 @@ local function DispatchCommand(line)
     else
       print("[Reforged] command rejected: perf needs on, off or lite")
     end
+  elseif op == "custom-map-launch" then
+    -- Not a developer command: no testing gate. Same launch as F8 in the Endless hub (#93 M2).
+    -- Hub only (the same check as the F5 and F6 keys): the launch runs in the hub, on the game thread.
+    local lib = REFORGED_CUSTOM and REFORGED_CUSTOM.lib
+    if not lib or type(lib.Launch) ~= "function" then
+      print("[Reforged] command rejected: custom-map-launch needs the custom-map module (" .. tostring(REFORGED_CUSTOM and REFORGED_CUSTOM.loadErr) .. ")")
+      return
+    end
+    local name = arg1 ~= "" and arg1 or nil
+    GameNow(function()
+      if not EndlessHubOpen() then
+        print("[Reforged] command rejected: custom-map-launch works only in the Endless hub")
+        return
+      end
+      local okL, errL = pcall(lib.Launch, name)
+      if not okL then print("[Reforged] custom-map launch err=" .. tostring(errL)) end
+    end)
   elseif op == "cvar" then
     local name, value = line:match("^%s*cvar%s+(%S+)%s+(%S+)%s*$")
     if not name or not name:match("^[%w%._]+$") or not value or not value:match("^[%w%.%-]+$") then
@@ -9928,6 +10449,109 @@ local function DispatchCommand(line)
     GameNow(RouteWhere)
   elseif op == "player-state" then
     GameNow(PlayerState)
+  elseif op == "look" then
+    -- Test only: set the player controller's rotation. Pitch and yaw are numbers in degrees. A positive pitch looks up.
+    local pitch, yaw = tonumber(arg1), tonumber(arg2)
+    if not pitch or not yaw then
+      print("[Reforged] command rejected: look needs <pitch> <yaw>")
+      return
+    end
+    GameNow(function()
+      local okF, pc = pcall(function() return FindFirstOf("OMDPlayerController") end)
+      if not okF or not pc then
+        print(string.format("[Reforged] look pitch=%s yaw=%s ok=false err=no player controller", tostring(pitch), tostring(yaw)))
+        return
+      end
+      local ok, err = pcall(function() pc:SetControlRotation({ Pitch = pitch, Yaw = yaw, Roll = 0 }) end)
+      print(string.format("[Reforged] look pitch=%s yaw=%s ok=%s%s", tostring(pitch), tostring(yaw), tostring(ok), ok and "" or (" err=" .. tostring(err))))
+    end)
+  elseif op == "walk" then
+    -- Test only (#100): adds movement input for seconds at yaw (degrees) to the player pawn, one tick every 50 ms.
+    -- bForce is true. Prints the start and end location and the 2D distance moved. Synthetic keys do not reach the game under Wine.
+    local yaw, secs = tonumber(arg1), tonumber(arg2)
+    if not yaw or not secs or secs < 0.1 or secs > 30 then
+      print("[Reforged] command rejected: walk needs <yaw> <seconds 0.1..30>")
+      return
+    end
+    GameNow(function()
+      local okF, pc = pcall(function() return FindFirstOf("OMDPlayerController") end)
+      local okP, pawn = false, nil
+      if okF and pc then okP, pawn = pcall(function() return pc.Pawn end) end
+      if not okP or not pawn then
+        print(string.format("[Reforged] walk yaw=%s seconds=%s ok=false err=no player pawn", tostring(yaw), tostring(secs)))
+        return
+      end
+      local rad = math.rad(yaw)
+      local dirX, dirY = math.cos(rad), math.sin(rad)
+      local startLoc = WalkReadLoc(pawn)
+      local okC, pawnClass = pcall(function() return pawn:GetClass():GetFullName() end)
+      local okI, ignored = pcall(function() return pc:IsMoveInputIgnored() end)
+      local okM, mode = pcall(function() return pawn.CharacterMovement.MovementMode end)
+      print(string.format("[Reforged] walk pawn=%s moveIgnored=%s mode=%s",
+        okC and tostring(pawnClass) or "?", okI and tostring(ignored) or "?", okM and tostring(mode) or "?"))
+      local totalTicks = math.max(1, math.floor(secs * 20 + 0.5))
+      local ticks, allOk, lastErr, firstErr = 0, true, nil, nil
+      GameLoop(50, function()
+        ticks = ticks + 1
+        -- #70: the pawn can be freed during the walk (map change, death). Stop the loop when it is not valid.
+        local okV, valid = pcall(function() return pawn:IsValid() end)
+        if not okV or valid ~= true then
+          print(string.format("[Reforged] walk yaw=%s seconds=%s ok=false err=pawn invalid", tostring(yaw), tostring(secs)))
+          return true
+        end
+        local ok, err = pcall(function() pawn:AddMovementInput({ X = dirX, Y = dirY, Z = 0 }, 1.0, true) end)
+        if not ok then
+          allOk, lastErr = false, err
+          firstErr = firstErr or err
+        end
+        if ticks < totalTicks then return false end
+        local endLoc = WalkReadLoc(pawn)
+        local moved = 0
+        if startLoc and endLoc then
+          moved = math.sqrt((endLoc.X - startLoc.X) ^ 2 + (endLoc.Y - startLoc.Y) ^ 2)
+        end
+        print(string.format("[Reforged] walk yaw=%s seconds=%s start=%s end=%s moved=%.0f ok=%s%s%s",
+          tostring(yaw), tostring(secs), WalkFormatLoc(startLoc), WalkFormatLoc(endLoc), moved, tostring(allOk),
+          allOk and "" or (" err=" .. tostring(lastErr)),
+          firstErr and (" firstErr=" .. tostring(firstErr)) or ""))
+        return true
+      end)
+    end)
+  elseif op == "push" then
+    -- Test only (#100): one LaunchCharacter at yaw (degrees) with speed. Prints the start and end location after 2000 ms.
+    local yaw, speed = tonumber(arg1), tonumber(arg2)
+    if not yaw or not speed or speed < 100 or speed > 5000 then
+      print("[Reforged] command rejected: push needs <yaw> <speed 100..5000>")
+      return
+    end
+    GameNow(function()
+      local okF, pc = pcall(function() return FindFirstOf("OMDPlayerController") end)
+      local okP, pawn = false, nil
+      if okF and pc then okP, pawn = pcall(function() return pc.Pawn end) end
+      if not okP or not pawn then
+        print(string.format("[Reforged] push yaw=%s speed=%s ok=false err=no player pawn", tostring(yaw), tostring(speed)))
+        return
+      end
+      local rad = math.rad(yaw)
+      local startLoc = WalkReadLoc(pawn)
+      local okL, err = pcall(function()
+        pawn:LaunchCharacter({ X = math.cos(rad) * speed, Y = math.sin(rad) * speed, Z = 0 }, true, true)
+      end)
+      GameDelay(2000, function()
+        -- #70: the pawn can be freed during the delay. Read its end location only when it is still valid.
+        local okV, valid = pcall(function() return pawn:IsValid() end)
+        local endLoc = nil
+        if okV and valid == true then endLoc = WalkReadLoc(pawn) end
+        local moved = 0
+        if startLoc and endLoc then
+          moved = math.sqrt((endLoc.X - startLoc.X) ^ 2 + (endLoc.Y - startLoc.Y) ^ 2)
+        end
+        local pawnErr = (okV and valid == true) and "" or " err=pawn invalid"
+        print(string.format("[Reforged] push yaw=%s speed=%s start=%s end=%s moved=%.0f ok=%s%s%s",
+          tostring(yaw), tostring(speed), WalkFormatLoc(startLoc), WalkFormatLoc(endLoc), moved, tostring(okL),
+          okL and "" or (" err=" .. tostring(err)), pawnErr))
+      end)
+    end)
   elseif op == "go" then
     GameNow(GoBreakCommand)
   elseif op == "fn-dump" then
@@ -10028,7 +10652,7 @@ do
       end
       local waves = REFORGED_WAVES
       local rollCtx = { round = ctx.round, seed = ctx.seed, cap = ctx.cap, mode = ctx.mode,
-        boss = (waves.bossEvery > 0 and ctx.round % waves.bossEvery == 0) }
+        boss = ReforgedIsBossRound(ctx.round) }
       local id, forced = nil, false
       local preview = REFORGED_MOD.preview == true
       if REFORGED_MOD.forced ~= nil then
@@ -10074,6 +10698,61 @@ do
     REFORGED_MOD.loadErr = errText
     print("[Reforged] modifiers loaded=false " .. tostring(errText))
   end
+end
+
+-- Custom maps (#93). custom_map.lua runs the spawns, the mission borrow and the enemy routes on the Test maps in its MAPS table.
+-- Loads from require, else from <Win64>/ue4ss/Mods/Reforged/Scripts. A load failure prints one line and nothing runs.
+-- One do ... end block, no main-chunk local. Start gets the globals it needs, read at call time for the flags.
+do
+  local okReq, req = pcall(require, "custom_map")
+  local lib, errText = nil, nil
+  if okReq and type(req) == "table" then
+    lib = req
+  else
+    errText = okReq and "require returned no table" or tostring(req)
+    local cmdPath = ResolveDirectorCommandPath()
+    local win64Dir = cmdPath and cmdPath:match("^(.*)/Mods/Reforged/director%.cmd$")
+    if win64Dir then
+      local okFile, res = pcall(dofile, win64Dir .. "/ue4ss/Mods/Reforged/Scripts/custom_map.lua")
+      if okFile and type(res) == "table" then
+        lib, errText = res, nil
+      else
+        errText = okFile and "dofile returned no table" or tostring(res)
+      end
+    else
+      errText = errText .. "; no Win64 path"
+    end
+  end
+  if lib ~= nil and type(lib.Start) == "function" then
+    REFORGED_CUSTOM = { lib = lib, loadErr = nil }
+    local okS, errS = pcall(lib.Start, {
+      GameLoop = GameLoop, GameDelay = GameDelay, WatchEmit = WatchEmit, GuidFromString = GuidFromString,
+      EndlessDifficulty = function() return ENDLESS_DIFFICULTY end,
+      Testing = function() return TESTING == true end,
+      TestMode = function() return TEST_MODE == true end,
+      Diag = DiagOn,
+      HubOpen = EndlessHubOpen, ConsoleExec = ConsoleExec, RegisterKeyBind = RegisterKeyBind, Key = Key,
+    })
+    if okS then
+      print("[Reforged] custom-map loaded=true maps=" .. tostring(lib.MapCount()))
+    else
+      REFORGED_CUSTOM.loadErr = tostring(errS)
+      print("[Reforged] custom-map loaded=false err=" .. tostring(errS))
+    end
+  else
+    REFORGED_CUSTOM = { lib = nil, loadErr = errText }
+    print("[Reforged] custom-map loaded=false " .. tostring(errText))
+  end
+end
+
+-- #103 phase 1: the custom-map title card. The post-hook runs custom_map.lua OnIntroHook after the load screen hides.
+-- The hook is registered only when the function exists (SafeRegisterHook). A nil lib does nothing. One do ... end block.
+do
+  local okI, errI = SafeRegisterHook("/Game/Game/BP_OMDGameInstance.BP_OMDGameInstance_C:HideLoadingScreen", function() end, function()
+    local lib = REFORGED_CUSTOM and REFORGED_CUSTOM.lib
+    if lib ~= nil and type(lib.OnIntroHook) == "function" then lib.OnIntroHook() end
+  end)
+  if not okI then print("[Reforged] custom-map intro hook not registered err=" .. tostring(errI)) end
 end
 
 -- Modifiers in Classic. Off unless the modifiersInClassic row is on.
@@ -11815,6 +12494,7 @@ do
     REFORGED_BOSSES_LIVE, REFORGED_BEARERS, REFORGED_WISPS = {}, {}, {}
     REFORGED.wispRound, REFORGED.wispKinds, REFORGED.wispMode = nil, nil, nil
     REFORGED_RULES.mb, REFORGED_RULES.riftLocs = {}, nil
+    REFORGED.mapBossPending = nil
     waveTrack.active, waveTrack.pawns = false, {}
     for i = #goblins, 1, -1 do goblins[i] = nil end
     CSPAWN_POINT_CACHE = {}
