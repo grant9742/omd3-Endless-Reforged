@@ -53,6 +53,86 @@ function GameNow(fn)
 end
 -- END game-thread compatibility
 
+-- Game build check (#72 M2). The marker "<exe size>-<PE stamp hex>-<FNV-1a32 of bytes 0..4095 hex>" of
+-- OMD-Win64-Shipping.exe names the build that the hard-coded offsets were measured on. An unknown or unreadable
+-- marker turns off the risky features (fail closed) unless settings.json has "buildCheck": "off".
+-- Globals only: the main chunk has a limit of 200 top-level locals. A test may seed KNOWN_BUILDS before load.
+KNOWN_BUILDS = KNOWN_BUILDS or {}
+KNOWN_BUILDS["85932032-66959158-55174702"] = "Steam 2024-07-15"
+
+-- Marker of the exe in win64Dir, or nil and the reason. One 4 KB read plus a seek to the end.
+function GameBuildMarker(win64Dir)
+  local fh, err = io.open(win64Dir .. "/OMD-Win64-Shipping.exe", "rb")
+  if not fh then return nil, "open: " .. tostring(err) end
+  local head = fh:read(4096)
+  local size = fh:seek("end")
+  fh:close()
+  if type(head) ~= "string" or #head < 4096 or not size then return nil, "short read" end
+  local lfanew = string.unpack("<I4", head, 0x3c + 1)
+  if lfanew + 12 > #head or head:sub(lfanew + 1, lfanew + 4) ~= "PE\0\0" then return nil, "no PE header" end
+  local stamp = string.unpack("<I4", head, lfanew + 8 + 1)
+  local h = 0x811c9dc5
+  for i = 1, #head do h = ((h ~ head:byte(i)) * 0x01000193) & 0xffffffff end
+  return string.format("%d-%08x-%08x", size, stamp, h)
+end
+
+-- Runs the build check once, at load. Sets BUILD_CHECK before anything can fail, so a failure leaves ok = false.
+-- The Win64 folder is found the same way as ResolveDirectorCommandPath (declared later in this file).
+-- The override is the one key "buildCheck" of settings.json (the same pattern read as the watch key below).
+function BuildCheckRun()
+  local B = { known = false, marker = nil, label = nil, override = "on", err = nil, ok = false, dir = nil, logged = false }
+  BUILD_CHECK = B
+  local okP, win64 = pcall(function()
+    local dirs = IterateGameDirectories()
+    for _, game in pairs(dirs) do
+      local path = game and game.Binaries and game.Binaries.Win64 and game.Binaries.Win64.__absolute_path
+      if path and tostring(path) ~= "" then
+        local normalized = tostring(path):gsub("\\", "/"):lower()
+        if normalized:match("/omd/binaries/win64$") then return tostring(path) end
+      end
+    end
+    return nil
+  end)
+  if not okP or type(win64) ~= "string" then
+    B.err = "no Win64 path"
+  else
+    B.dir = win64
+    local okM, marker, why = pcall(GameBuildMarker, win64)
+    if not okM then B.err = "marker error: " .. tostring(marker)
+    elseif marker == nil then B.err = tostring(why)
+    else B.marker = marker end
+  end
+  local okO, text = pcall(function()
+    if not B.dir then return nil end
+    local fh = io.open(B.dir .. "/Mods/Reforged/settings.json", "r")
+    if not fh then return nil end
+    local s = fh:read("*a")
+    fh:close()
+    return s
+  end)
+  if okO and type(text) == "string" and text:match('"buildCheck"%s*:%s*"(%a+)"') == "off" then B.override = "off" end
+  B.known = B.marker ~= nil and KNOWN_BUILDS[B.marker] ~= nil
+  B.label = B.known and KNOWN_BUILDS[B.marker] or nil
+  B.ok = B.known or B.override == "off"
+  print(string.format("[Reforged] build-check known=%s marker=%s label=%s override=%s err=%s",
+    tostring(B.known), B.marker or "?", B.label or "-", B.override, B.err or "nil"))
+  return B
+end
+pcall(BuildCheckRun)
+
+-- True when the build check passed (a known build, or the override). Fails closed when the check did not run.
+function BuildCheckOk()
+  return BUILD_CHECK ~= nil and BUILD_CHECK.ok == true
+end
+
+-- Logs the degraded line once per game run. Called at the Reforged map ready.
+function BuildCheckDegradedLog()
+  local B = BUILD_CHECK
+  if B == nil or B.ok or B.logged then return end
+  B.logged = true
+  print("[Reforged] build-check reforged degraded: queue block, tick hold, break gate, anchor delay and Moneybags rewards are off on this game build")
+end
+
 -- Wisp spawn effects are excluded from class counts.
 
 -- Registers a UFunction hook only when the function exists. A RegisterHook call on a missing
@@ -179,6 +259,7 @@ ALLOW_NATIVE_QUEUE_EDIT = false
 local function RoundActive(c)
   return ALLOW_NATIVE_QUEUE_EDIT == true
 end
+do -- local scope (#69)
 local function setRift(reason)
   ExecuteInGameThread(function()
     local c = coordinator()
@@ -213,6 +294,7 @@ GameLoop(500, function()
   return false
 end)
 
+end -- local scope (#69)
 local PROTO_BY_NAME = {}
 for _, row in ipairs(PROTOS) do PROTO_BY_NAME[row.name] = row end
 -- "LootGoblin" is the Kobold proto with a flag. A pawn spawned from it is registered as a loot goblin (see GoblinTick).
@@ -732,7 +814,11 @@ end
 
 -- BEGIN WATCH STREAM. Reads only: no asset loads, no spawn calls. Every game read is in pcall.
 -- Output: watch.jsonl beside director.cmd, one JSON object per line. Section: "Game watch stream".
-if WATCH_ON == nil then WATCH_ON = true end
+-- #71 M2: the stream is a developer tool, off by default. WATCH_SETTING is the settings row `watch`. WATCH_WHY is the source
+-- of WATCH_ON: settings, test-mode, testing or command. WatchStreamSync sets WATCH_ON.
+if WATCH_ON == nil then WATCH_ON = false end
+WATCH_SETTING = "off"
+WATCH_WHY = nil
 if WATCH_TRACK_MS == nil then WATCH_TRACK_MS = 2000 end
 if WATCH_HITS == nil then WATCH_HITS = false end -- `watch-hits on`. Off by default; the hooks register on the first `on`.
 do
@@ -864,8 +950,26 @@ do
     tbl.ev, tbl.t, tbl.n = ev, os.time(), W.seq + 1
     local line = Encode(tbl) -- before the seq step: a failed encode leaves no gap in n
     W.seq = W.seq + 1
-    fh:write(line, "\n")
-    fh:flush()
+    -- #70 L22: a failed write closes the handle and clears it, so the next event opens the file again.
+    local okW, werr = pcall(function() fh:write(line, "\n"); fh:flush() end)
+    if not okW then
+      pcall(function() fh:close() end)
+      if W.fh == fh then W.fh, W.path = nil, nil end
+      error(werr, 0)
+    end
+  end
+
+  -- #71 M2: the one place that sets WATCH_ON. It logs each change of state or source.
+  function WatchStreamSet(on, why)
+    if WATCH_ON == on and WATCH_WHY == why then return end
+    WATCH_ON, WATCH_WHY = on, why
+    print("[Reforged] watch on=" .. tostring(on) .. " source=" .. tostring(why))
+  end
+  -- Test mode first, then testing, then the settings value. Test mode and testing off return the stream to the settings value.
+  function WatchStreamSync()
+    if TEST_MODE == true then return WatchStreamSet(true, "test-mode") end
+    if TESTING == true then return WatchStreamSet(true, "testing") end
+    WatchStreamSet(WATCH_SETTING == "on", "settings")
   end
 
   function WatchEmit(ev, fields)
@@ -965,11 +1069,11 @@ do
   end
 
   -- died cause (#103): `rift` when the pawn's last good position is within 400 units of a live OMDRift, else `kill`.
-  -- An unknown position gives `kill`. RiftList reads the rifts now, so a moved rift is measured where it stands.
-  local function DeathCause(x, y, z)
+  -- An unknown position gives `kill`. The caller passes the rift list of this pass (S3: read once per pass, not per death),
+  -- so a moved rift is measured where it stands at the first death of the pass. nil rifts gives `kill`.
+  local function DeathCause(x, y, z, rifts)
     if IsOrigin(x, y, z) then return "kill" end
-    local okR, rifts = pcall(RiftList)
-    if not okR or type(rifts) ~= "table" then return "kill" end
+    if type(rifts) ~= "table" then return "kill" end
     for _, r in ipairs(rifts) do
       local l = r.loc
       if l then
@@ -984,10 +1088,14 @@ do
   -- 0 none, 1 the player pawn, 2 barricade or trap, 3 door, 4 other. nil when a read fails. Each read is in pcall.
   -- The controller is the Controller property, else GetController() (the property read was not valid on a live
   -- OrcLight, docs/game-thread-assert-research-2026-10-18.md). The first read error is printed once (W.tgErrLogged).
-  local function TrackReads(actor, playerAddr)
+  -- S4 (release audit): hp is read every track pass. tg is read at most every 4 s per pawn (rec.tgAt, os.time seconds).
+  -- Between reads the row keeps the last tg (rec.tg). rec is the pawn record of the row.
+  local function TrackReads(actor, playerAddr, rec)
     local hp, tg = nil, nil
     local okH, h = pcall(function() return actor:GetHealth() end)
     if okH and type(h) == "number" then hp = math.floor(h * 10 + 0.5) / 10 end
+    local now = os.time()
+    if rec ~= nil and rec.tgAt ~= nil and now - rec.tgAt < 4 then return hp, rec.tg end
     local okT, kind = pcall(function()
       local ctrl = nil
       local okP, cP = pcall(function() return actor.Controller end)
@@ -1015,6 +1123,7 @@ do
       W.tgErrLogged = true
       print("[Reforged] watch tg read err=" .. tostring(kind))
     end
+    if rec ~= nil then rec.tgAt, rec.tg = now, tg end
     return hp, tg
   end
 
@@ -1155,7 +1264,7 @@ do
       end)
       if okK and keep == true then
         print("[Reforged] difficulty at playable=" .. tostring(diff) .. " kept (custom map, classic)")
-      else
+      elseif EndlessMapNow() then -- #68 M1: a campaign map keeps its own difficulty
         pcall(SetEndlessDifficulty, "playable-fix")
         diff2 = ReadGameDifficulty()
       end
@@ -1448,6 +1557,40 @@ do
   -- END WATCH HITS
 
   -- One diff pass. Runs every 500 ms while the watch is on. The tick and track events run on every 2nd pass (1 s).
+  -- M3 (release 0.2.2): the game-end read, shared by the stream-on Pass and the stream-off path. nil = unknown.
+  -- rift is RiftPoints, mode is the queue block mode, won is bDidWin (boolean only), integrity is the read-only game integrity (#102).
+  local function GameEndFields(gsE)
+    local riftE = nil
+    pcall(function() riftE = gsE.RiftPoints end)
+    local okM, modeE = pcall(QueueBlockMode)
+    if not okM then modeE = nil end
+    local wonE = nil
+    pcall(function() wonE = gsE.bDidWin end)
+    if type(wonE) ~= "boolean" then wonE = nil end
+    local integE = nil
+    pcall(function()
+      local giE = ScoreBlockInstance()
+      if giE then integE = giE:GetGameIntegrity() end
+    end)
+    if type(integE) ~= "number" then integE = nil end
+    return { rift = riftE, mode = modeE, won = wonE, integrity = integE }
+  end
+  local function GameEndLine(f, wave)
+    print("[Reforged] game-end rift=" .. tostring(f.rift) .. " wave=" .. tostring(wave) .. " mode=" .. tostring(f.mode)
+      .. " won=" .. tostring(f.won) .. " integrity=" .. tostring(f.integrity))
+  end
+  -- M3: the stream-off path prints the game-end line once per map and writes nothing to watch.jsonl.
+  local function GameEndOff()
+    if W.gameEndSent then return end
+    local okS, gs = pcall(FindFirstOf, "OMDGameState")
+    if not okS or not gs then return end
+    local okG, ended = pcall(function() return gs:GetIsGameEnded() end)
+    if not okG or ended ~= true then return end
+    W.gameEndSent = true
+    local okW, wave = pcall(function() return gs.CurrentWave end)
+    GameEndLine(GameEndFields(gs), okW and wave or nil)
+  end
+
   local function Pass()
     W.pass = W.pass + 1
     local okDoor, errDoor = pcall(WatchDoorsScan) -- #103 C2: door events, before the rest of the pass
@@ -1457,6 +1600,7 @@ do
     local list = LiveNonWispAI()
     local now = os.time()
     local seen, classes, coordAddr, coordTried, deadNow = {}, {}, nil, false, 0
+    local passRifts = nil -- S3: the rift list of this pass, read at the first death (nil = not read yet)
     for _, e in ipairs(list) do
       -- The object name is unique per pawn. ShortName alone gives the class name, so two pawns of one class would collide.
       local id = e.full:match("%.([^%.%s]+)$") or ShortName(e.full)
@@ -1489,8 +1633,13 @@ do
           })
         end
         if dead and not rec.dead then
+          -- S3: RiftList is read once per pass, at the first death. Later deaths of this pass reuse it.
+          if passRifts == nil then
+            local okR, rl = pcall(RiftList)
+            passRifts = (okR and rl) or false
+          end
           WatchEmit("died", { id = id, x = NV(rec.x), y = NV(rec.y), z = NV(rec.z), life = now - rec.born, health = NV(Health(e.actor)),
-            cause = DeathCause(rec.x, rec.y, rec.z) })
+            cause = DeathCause(rec.x, rec.y, rec.z, passRifts or nil) })
         end
         rec.dead = dead
       end
@@ -1582,24 +1731,9 @@ do
           if okG and type(ended) == "boolean" then gend = ended end
           if gend == true and not W.gameEndSent then
             W.gameEndSent = true
-            local riftE = nil
-            pcall(function() riftE = gsE.RiftPoints end)
-            local okM, modeE = pcall(QueueBlockMode)
-            if not okM then modeE = nil end
-            -- won is the native bDidWin flag. nil when the read fails or is not a boolean.
-            local wonE = nil
-            pcall(function() wonE = gsE.bDidWin end)
-            if type(wonE) ~= "boolean" then wonE = nil end
-            -- integrity is read only (#102). nil when the instance or the read is missing.
-            local integE = nil
-            pcall(function()
-              local giE = ScoreBlockInstance()
-              if giE then integE = giE:GetGameIntegrity() end
-            end)
-            if type(integE) ~= "number" then integE = nil end
-            WatchEmit("game-end", { rift = NV(riftE), wave = NV(wave), mode = NV(modeE), won = NV(wonE), integrity = NV(integE) })
-            print("[Reforged] game-end rift=" .. tostring(riftE) .. " wave=" .. tostring(wave) .. " mode=" .. tostring(modeE)
-              .. " won=" .. tostring(wonE) .. " integrity=" .. tostring(integE))
+            local f = GameEndFields(gsE)
+            WatchEmit("game-end", { rift = NV(f.rift), wave = NV(wave), mode = NV(f.mode), won = NV(f.won), integrity = NV(f.integrity) })
+            GameEndLine(f, wave)
           end
         end
       end
@@ -1632,7 +1766,7 @@ do
         if pp then pcall(function() pAddr = pp:GetAddress() end) end
         for _, rec in pairs(W.pawns) do
           local hp, tg = nil, nil
-          if byId[rec.id] then hp, tg = TrackReads(byId[rec.id], pAddr) end
+          if byId[rec.id] then hp, tg = TrackReads(byId[rec.id], pAddr, rec) end
           p[#p + 1] = { rec.id, Round(rec.x), Round(rec.y), Round(rec.z), rec.dead and 1 or 0, NV(hp), NV(tg) }
         end
         WatchEmit("track", { p = p })
@@ -1661,6 +1795,15 @@ do
 
   -- Called from both auto-test map-ready places. The door list is read here and kept for the nearest-door lookup.
   function WatchMapReady(missionName)
+    -- #68 M1: the Endless gate, read only. One log line per map. The map event carries the same fields.
+    local gate = MapGateStore()
+    print(string.format("[Reforged] endless-gate endless=%s campaign=%s mission=%s row=%s rowCheck=%s",
+      tostring(gate.endless), tostring(gate.campaign), tostring(gate.mission), tostring(gate.row or "none"), tostring(gate.rowCheck)))
+    if gate.endless == nil then
+      print("[Reforged] endless-gate skip reason=unreadable")
+    elseif gate.endless ~= true then
+      print("[Reforged] endless-gate off: no takeover, no difficulty, no Rift move on this map")
+    end
     pcall(ReforgedWispClearAuto, "map-ready") -- The auto wisps are destroyed first
     REFORGED_WISPS = {} -- The probe wisps die with the map
     W.phase, W.hoardKey, W.playableSent, W.paused = nil, nil, false, nil
@@ -1696,10 +1839,13 @@ do
       end
       W.doors, W.pawns, W.doorsSent = doors, {}, false
       W.doorEv = {} -- #103 C2: the door event state starts over on a new map
+      W.doorScan = nil -- S2: the next pass scans the doors of the new map
       local fields = { level = NV(level), doors = DoorList() }
       -- The mode at map ready (MapReadyFor applied it first). The state line reads it from here.
       local okMd, md = pcall(QueueBlockMode)
       fields.mode = NV(okMd and md or nil)
+      -- #68 M1: the Endless gate fields (see the endless-gate log line above).
+      fields.endless, fields.campaign, fields.mission, fields.row = NV(gate.endless), gate.campaign, gate.mission, NV(gate.row)
       if raw then fields.levelRaw = raw end
       WatchEmit("map", fields)
     end)
@@ -1710,6 +1856,7 @@ do
   function WatchMapLeave()
     for _, d in ipairs(W.doors) do d.actor = nil end
     W.doorsSent = true
+    W.doorScan = nil -- S2: the cached door objects of the old map are dropped
   end
 
   -- #103 C2: a door event is due when no door event went out for this door in an earlier pass. A pass is 500 ms, so a
@@ -1735,36 +1882,58 @@ do
   -- #103 C2: reads each door of the preview door classes (all maps). Writes a door event at first sight and when Health
   -- or bIsOpen changes, at most once per pass. Reads only, every game read in pcall. max is GetMaxHealth, else the first
   -- Health read. open is 1 or 0.
+  -- S2 (release audit): FindAllOf runs for the door classes only when the list is unknown (W.doorScan is nil), the map
+  -- changed (WatchMapReady and WatchMapLeave clear W.doorScan), 5 s passed since the last scan, or a cached door is invalid.
+  -- Other passes read Health and bIsOpen on the cached door objects. Each cached door gets an IsValid check per pass.
   function WatchDoorsScan()
     W.doorEv = W.doorEv or {}
-    local seen = {}
-    for _, cls in ipairs(REFORGED_PREVIEW_DOOR_CLASSES) do
-      local okF, found = pcall(FindAllOf, cls)
-      for _, d in ipairs((okF and found) or {}) do
-        local okV, valid = pcall(function() return d:IsValid() end)
-        local okN, full = pcall(function() return d:GetFullName() end)
-        if okV and valid == true and okN and type(full) == "string" and not seen[full] then
-          seen[full] = true
-          local hp, open = nil, nil
-          pcall(function() hp = d.Health end)
-          pcall(function() open = d.bIsOpen end)
-          if type(hp) ~= "number" then hp = nil end
-          if type(open) ~= "boolean" then open = nil end
-          local openN = nil
-          if open ~= nil then openN = open and 1 or 0 end
-          local rec = W.doorEv[full]
-          if rec == nil then
-            rec = { seen = false }
-            pcall(function() rec.max = d:GetMaxHealth() end)
-            if type(rec.max) ~= "number" then rec.max = hp end
-            W.doorEv[full] = rec
+    local now = os.time()
+    local sc = W.doorScan
+    local stale = sc == nil or now - sc.at >= 5
+    if not stale then
+      for _, e in ipairs(sc.list) do
+        local okV, valid = pcall(function() return e.d:IsValid() end)
+        if not (okV and valid == true) then stale = true break end
+      end
+    end
+    if stale then
+      sc = { at = now, list = {} }
+      W.doorScan = sc
+      local seen = {}
+      for _, cls in ipairs(REFORGED_PREVIEW_DOOR_CLASSES) do
+        local okF, found = pcall(FindAllOf, cls)
+        for _, d in ipairs((okF and found) or {}) do
+          local okV, valid = pcall(function() return d:IsValid() end)
+          local okN, full = pcall(function() return d:GetFullName() end)
+          if okV and valid == true and okN and type(full) == "string" and not seen[full] then
+            seen[full] = true
+            sc.list[#sc.list + 1] = { d = d, full = full }
           end
-          local changed = not rec.seen or rec.hp ~= hp or rec.open ~= openN
-          if (hp ~= nil or openN ~= nil) and changed and WatchDoorEventDue(rec.lastPass, W.pass) then
-            local x, y, z = Pos(d)
-            WatchEmit("door", { i = NV(WatchDoorNumber(x, y, z)), hp = NV(hp), max = NV(rec.max), open = NV(openN) })
-            rec.seen, rec.hp, rec.open, rec.lastPass = true, hp, openN, W.pass
-          end
+        end
+      end
+    end
+    for _, e in ipairs(sc.list) do
+      local d, full = e.d, e.full
+      do
+        local hp, open = nil, nil
+        pcall(function() hp = d.Health end)
+        pcall(function() open = d.bIsOpen end)
+        if type(hp) ~= "number" then hp = nil end
+        if type(open) ~= "boolean" then open = nil end
+        local openN = nil
+        if open ~= nil then openN = open and 1 or 0 end
+        local rec = W.doorEv[full]
+        if rec == nil then
+          rec = { seen = false }
+          pcall(function() rec.max = d:GetMaxHealth() end)
+          if type(rec.max) ~= "number" then rec.max = hp end
+          W.doorEv[full] = rec
+        end
+        local changed = not rec.seen or rec.hp ~= hp or rec.open ~= openN
+        if (hp ~= nil or openN ~= nil) and changed and WatchDoorEventDue(rec.lastPass, W.pass) then
+          local x, y, z = Pos(d)
+          WatchEmit("door", { i = NV(WatchDoorNumber(x, y, z)), hp = NV(hp), max = NV(rec.max), open = NV(openN) })
+          rec.seen, rec.hp, rec.open, rec.lastPass = true, hp, openN, W.pass
         end
       end
     end
@@ -1772,14 +1941,14 @@ do
 
   -- Counted marker: raw Int64 at +0x848 on OMDAICharacter. Read only as a raw value, never as an object.
   W.markerOk = false
-  if PropertyTypes and PropertyTypes.Int64Property ~= nil then
+  if PropertyTypes and PropertyTypes.Int64Property ~= nil and BuildCheckOk() then
     local okR = pcall(RegisterCustomProperty, {
       Name = "ReforgedSpawnCoord", Type = PropertyTypes.Int64Property,
       BelongsToClass = "/Script/OMD.OMDAICharacter", OffsetInternal = 0x848,
     })
     W.markerOk = okR
   end
-  print("[Reforged] watch counted-marker registered=" .. tostring(W.markerOk))
+  print("[Reforged] watch counted-marker registered=" .. tostring(W.markerOk) .. (BuildCheckOk() and "" or " reason=build"))
 
   -- Traceback handler for the watch pass. WatchErrText keeps the first traceback line that points into main.lua.
   function WatchTrace(e) return debug.traceback(tostring(e), 2) end
@@ -1795,6 +1964,25 @@ do
     if WATCH_ON then
       local ok, err = xpcall(Pass, WatchTrace)
       if not ok then WatchErr(WatchErrText(err)) end
+    else
+      -- S1 (release audit): the gameplay steps of Pass also run here when the stream is off. With the stream on, Pass runs
+      -- them. One run per 500 ms tick either way. Each step has its own pcall. A failed step prints once for the run.
+      local okP, errP = pcall(PhaseTick, nil, nil)
+      if not okP and not W.gameplayErrLogged then
+        W.gameplayErrLogged = true
+        print("[Reforged] gameplay phase step err=" .. tostring(errP))
+      end
+      local okY, errY = pcall(PlayableTick)
+      if not okY and not W.gameplayErrLogged then
+        W.gameplayErrLogged = true
+        print("[Reforged] gameplay playable step err=" .. tostring(errY))
+      end
+      -- M3 (release 0.2.2): the game-end line also prints with the stream off. Each step has its own pcall.
+      local okE, errE = pcall(GameEndOff)
+      if not okE and not W.gameplayErrLogged then
+        W.gameplayErrLogged = true
+        print("[Reforged] gameplay game-end step err=" .. tostring(errE))
+      end
     end
     return false
   end)
@@ -2248,6 +2436,8 @@ end
 -- source is "cmd" (default, the developer command) or "key" (F7). Returns the result text.
 function RiftMove(target, source)
   local res = { result = "no-rift", source = source or "cmd", rifts = 0, ends = 0, endsMoved = 0 }
+  -- #68 M1: a Rift move runs on an Endless map only. Every other map replies not-endless.
+  if not EndlessMapNow() then res.result = "not-endless"; RiftMoveReport(res); return res.result end
   local rifts = RiftList()
   res.rifts = #rifts
   if #rifts == 0 then RiftMoveReport(res); return res.result end
@@ -2343,6 +2533,11 @@ end
 -- source is "key" (F7, the default) or "pad" (LB + RB). It is the source field of every report.
 function RiftMoveKey(source)
   local src = source or "key"
+  -- #68 M1: F7 and LB + RB do nothing on a map that is not Endless.
+  if not EndlessMapNow() then
+    RiftMoveReport({ result = "not-endless", source = src, rifts = 0, ends = 0, endsMoved = 0 })
+    return
+  end
   local function Refuse(result, text)
     local rifts = 0
     local okL, list = pcall(RiftList)
@@ -3295,6 +3490,7 @@ DIAG[#DIAG + 1] = HookGoBreaks
 -- Wave events. PawnHasDied_impl (0x140fb00e0) takes the coordinator and the dead
 -- pawn. Candidate break names are registered only to learn which exist; a
 -- registered=false line means the name is wrong.
+do -- local scope (#69)
 local deathCalls = 0
 local function HookWaveEvents()
   local okD, errD = SafeRegisterHook("/Script/OMD.OMDOnslaughtCoordinator:PawnHasDied", function(self, pawn)
@@ -3311,6 +3507,7 @@ local function HookWaveEvents()
   end
 end
 DIAG[#DIAG + 1] = HookWaveEvents
+end -- local scope (#69)
 local lastFeignAttempt = -1
 local function SamplePlayerAggro(pawn, label)
   local total, targeting = 0, 0
@@ -3491,9 +3688,12 @@ function ReforgedCap(r)
   return raw
 end
 -- Pawns in round r: sizeBase, plus sizeStep per round, times REFORGED_SIZE_SCALE and the level size factor. At least 1.
+-- M6 (release audit): at most REFORGED_BUDGET, the same ceiling ReforgedCap uses. nil budget = no ceiling.
 function ReforgedSize(r)
   local w = REFORGED_WAVES
-  return math.max(1, math.floor((w.sizeBase + w.sizeStep * (r - 1)) * REFORGED_SIZE_SCALE * ReforgedSizeFactor() + 0.5))
+  local size = math.floor((w.sizeBase + w.sizeStep * (r - 1)) * REFORGED_SIZE_SCALE * ReforgedSizeFactor() + 0.5)
+  if REFORGED_BUDGET ~= nil and size > REFORGED_BUDGET then size = REFORGED_BUDGET end
+  return math.max(1, size)
 end
 -- Promote percent: the promotePercent setting when it is a number, else promoteStep per round, at most promoteMax.
 function ReforgedPromote(r)
@@ -4447,6 +4647,7 @@ end
 -- coordinator marker are not kept, so they are not paid twice. An unreadable marker is not kept.
 -- classic: true when the call comes from a Classic modifier. Then the Moneybags is kept in Classic only.
 function ReforgedMoneybagsRegister(actor, full, classic)
+  if not BuildCheckOk() then return false end -- #72 M2: the marker is not registered; silent (the map-ready line says it once)
   local mode = QueueBlockMode()
   if classic == true then
     if mode ~= "classic" then return false end
@@ -4515,15 +4716,20 @@ end
 -- A kept Moneybags that is dead, or no longer valid (a dead pawn that was destroyed), is removed.
 -- If its location reads and it is at a rift (ReforgedAtRift), it is not paid. Otherwise it is paid once.
 -- A failed location read (a destroyed actor) pays as before.
+-- #70 L7: an invalid actor gets no method call. Its location is not read (a native access violation is not caught by pcall).
 function ReforgedMoneybagsStep()
   for key, rec in pairs(REFORGED_RULES.mb) do
     local okV, valid = pcall(function() return rec.actor:IsValid() end)
-    if not (okV and valid == true) or PawnIsDead(rec.actor) then
+    local invalid = not (okV and valid == true)
+    if invalid or PawnIsDead(rec.actor) then
       REFORGED_RULES.mb[key] = nil
-      local okL, x, y, z = pcall(function()
-        local v = rec.actor:K2_GetActorLocation()
-        return v.X, v.Y, v.Z
-      end)
+      local okL, x, y, z = false, nil, nil, nil
+      if not invalid then
+        okL, x, y, z = pcall(function()
+          local v = rec.actor:K2_GetActorLocation()
+          return v.X, v.Y, v.Z
+        end)
+      end
       if okL and type(x) == "number" and type(y) == "number" and type(z) == "number" and ReforgedAtRift({ X = x, Y = y, Z = z }) then
         print("[Reforged] moneybags died at rift, not paid")
         WatchEmit("moneybags", { outcome = "rift", round = REFORGED.round })
@@ -4795,6 +5001,7 @@ local ENDLESS_MODES = { classic = true, manual = true, reforged = true }
 -- The level counts as playable when CurrentWave >= 1 and the Endless iteration (gsIter in panel-status) is >= 0.
 -- The takeover then waits for LEVEL_STABLE_NEEDED playable checks in a row.
 local takeoverPending = nil
+do -- local scope (#69)
 local LEVEL_STABLE_NEEDED = 3
 local levelStable = 0
 -- Returns playable, wave text, iter text. The texts are for the log. Global: the watch stream calls it.
@@ -4821,6 +5028,8 @@ GameLoop(2000, function()
   do
     local function gtBody()
       if not takeoverPending then return end
+      -- #68 M1: the playable takeover runs on an Endless map only.
+      if not EndlessMapNow() then takeoverPending = nil; anchorCapture = nil; return end
       if anchorCapture then AnchorCaptureTick(); return end
       local playable, wave, iter = LevelPlayable()
       if not playable then
@@ -4846,7 +5055,15 @@ GameLoop(2000, function()
   return false
 end)
 ENDLESS_MODE = "classic"      -- the mode applied at the last map load; panel-status reports it as mode=
+end -- local scope (#69)
 local function ApplyEndlessMode()
+  -- #68 M1: not an Endless map, so no takeover. ENDLESS_MODE is classic for the panel and the status line.
+  if not EndlessMapNow() then
+    takeoverPending = nil
+    anchorCapture = nil
+    ENDLESS_MODE = "classic"
+    return
+  end
   -- WAVE_COMMAND_PATH is the global copy of COMMAND_PATH (that local is declared below)
   local path = WAVE_COMMAND_PATH and (WAVE_COMMAND_PATH:gsub("director%.cmd$", "endless-mode.txt"))
   local mode = "classic"
@@ -4859,6 +5076,14 @@ local function ApplyEndlessMode()
   end
   if not ENDLESS_MODES[mode] then
     print("[Reforged] endless-mode '" .. mode .. "' is unknown; using classic")
+    mode = "classic"
+  end
+  -- M1 (release 0.2.2): an unknown build runs Manual and Reforged as Classic. The settings file keeps the saved mode.
+  if mode ~= EndlessModeForBuild(mode) then
+    if BUILD_CHECK == nil or BUILD_CHECK.fallbackLogged ~= true then
+      if BUILD_CHECK ~= nil then BUILD_CHECK.fallbackLogged = true end
+      print("[Reforged] build-check unknown build: Endless runs as Classic")
+    end
     mode = "classic"
   end
   ENDLESS_MODE = mode
@@ -4889,6 +5114,25 @@ local modeTextHub = nil  -- the hub object that modeTextBlock was built for
 -- The row widgets (global, not local: the main chunk is near the 200-local limit). Nil fields in fallback.
 ModeRow = {}
 
+-- #70 L21: renames tmp over path. The rename comes first, so the old file stays until the new one is in place.
+-- Only when the rename over an existing file fails (some C runtimes refuse it) is path removed and the rename retried.
+-- A failed rename removes tmp. Returns true, or nil and the error text. A global, not a local (main chunk limit).
+function ReplaceFileAtomic(tmp, path)
+  local renamed, rerr = os.rename(tmp, path)
+  if not renamed then
+    -- Remove the target only when tmp exists. Then the new text is in tmp if the retry fails, so tmp is kept.
+    local probe = io.open(tmp, "r")
+    if probe then
+      probe:close()
+      os.remove(path)
+      renamed, rerr = os.rename(tmp, path)
+      if not renamed then return nil, rerr end
+    end
+  end
+  if not renamed then pcall(os.remove, tmp) return nil, rerr end
+  return true
+end
+
 local function WriteEndlessMode(mode)
   if mode == lastWrittenMode then return end
   local path = WAVE_COMMAND_PATH and (WAVE_COMMAND_PATH:gsub("director%.cmd$", "endless-mode.txt"))
@@ -4896,10 +5140,14 @@ local function WriteEndlessMode(mode)
   local tmp = path .. ".tmp"
   local fh, err = io.open(tmp, "w")
   if not fh then print("[Reforged] endless-mode not saved: " .. tostring(err)); return end
-  fh:write(mode:lower() .. "\n")
-  fh:close()
-  os.remove(path)
-  local renamed, rerr = os.rename(tmp, path)
+  local wok = fh:write(mode:lower() .. "\n")
+  local cok = fh:close()
+  if not wok or not cok then
+    pcall(os.remove, tmp)
+    print("[Reforged] endless-mode not saved: write or close failed")
+    return
+  end
+  local renamed, rerr = ReplaceFileAtomic(tmp, path)
   if not renamed then print("[Reforged] endless-mode not saved: " .. tostring(rerr)); return end
   lastWrittenMode = mode
   print("[Reforged] endless-mode saved " .. mode)
@@ -5019,6 +5267,7 @@ local function EndlessHubOpen()
   return okV and valid == true
 end
 
+do -- local scope (#69)
 local function HubPanelClasses(hub)
   -- diagnostic: how many live widgets of each candidate class the hub holds
   for _, cls in ipairs({ "MissionListEntryProto_UMG_C", "MissionListEntryProto_UMG", "MissionListScrollBox", "ScrollBox", "VerticalBox", "HorizontalBox" }) do
@@ -5035,6 +5284,8 @@ end
 
 -- The hub's mission list is the ScrollBox holding the most children (the
 -- map entries); the text goes into the ScrollBox's parent, above it.
+end -- local scope (#69)
+do -- local scope (#69)
 local function FindMissionScroll()
   local okF, list = pcall(FindAllOf, "ScrollBox")
   local best, bestCount = nil, 0
@@ -5518,8 +5769,13 @@ do
   function PlayUiLaunch()
     local ok, err = pcall(function()
       WatchEmit("ui", { screen = "play", action = "launch", level = Null(PlayLevel()), mode = Null(ReadEndlessMode()) })
-      -- The Endless difficulty is set on every launch, not only at Play start.
-      pcall(SetEndlessDifficulty, "hub-launch")
+      -- The Endless difficulty is set on every launch of an Endless row, not only at Play start (#68 M1: not a campaign row).
+      local okG, g = pcall(EndlessGateRead)
+      if okG and type(g) == "table" and g.endless == true and g.rowCheck == true then
+        pcall(SetEndlessDifficulty, "hub-launch")
+      else
+        print("[Reforged] hub-launch difficulty skipped: the launched mission is not an Endless row")
+      end
     end)
     if not ok then print("[Reforged] play-ui launch err=" .. tostring(err)) end
   end
@@ -5550,7 +5806,9 @@ end
 local function HookEndlessModeHub()
   -- LoadAsset may only run on the game thread; the hook is registered there too
   ExecuteInGameThread(function()
-    LoadAsset("/Game/UI/HUB/HUBScreen_UMG.HubScreen_UMG_C")
+    -- #70 L27: LoadAsset in pcall. A failed load is logged and the hook registration still runs.
+    local okLA, errLA = pcall(LoadAsset, "/Game/UI/HUB/HUBScreen_UMG.HubScreen_UMG_C")
+    if not okLA then print("[Reforged] endless-mode hub LoadAsset err=" .. tostring(errLA)) end
     local ok, err = SafeRegisterHook("/Game/UI/HUB/HUBScreen_UMG.HubScreen_UMG_C:Construct", function()
       HookTrace("HubScreen.Construct")
       -- Each call has its own pcall, so a failure in one does not stop the other.
@@ -5574,7 +5832,9 @@ HookEndlessModeHub()
 -- Buttons and hook paths: the main-menu widgets research. `start-screen off` makes every hook do nothing.
 if START_SCREEN == nil then START_SCREEN = true end
 -- Wrapped in do ... end: the main chunk has a limit of 200 locals (Lua), and this block adds several.
+end -- local scope (#69)
 do
+do -- local scope (#69)
 local START_COLLAPSE = { "PatchNotesBtn", "ChangeUserButton", "StoreOfferWIdget_UMG", "News_UMG" }
 local CAMPAIGN_SCREEN_GUID = "4D71576E-4A6D-534D-650C-58AA04FBCCE3" -- CampaignScreen (the Endless map list)
 
@@ -5782,6 +6042,8 @@ HookStartScreen()
 end
 
 -- F6 cycles the Endless mode while the hub is open (route B). Outside the hub the key does nothing.
+end -- local scope (#69)
+do -- local scope (#69)
 local okKeyBind = pcall(function()
   -- Not F8: the Cinnamon desktop opens Nemo on F8 (observed 2026-10-18).
   RegisterKeyBind(Key.F6, function()
@@ -5800,6 +6062,7 @@ end)
 
 -- F5 toggles the modifier setting of the current mode while the Endless hub is open. Outside the hub it does nothing.
 -- The key callback only sets the flag. The loop below runs ModifiersKeyPress on the game thread.
+end -- local scope (#69)
 do
   local okModKeyBind = pcall(function()
     RegisterKeyBind(Key.F5, function()
@@ -5963,8 +6226,37 @@ function MAP_READY.claim(c)
   return true
 end
 
+-- #68 M1: the Endless gate of the current map. MAP_GATE is the read stored at map-ready (MapGateStore, called first in
+-- MapReadyFor and in WatchMapReady). It is nil after a map leave. EndlessMapNow then reads the game, at most once a second,
+-- so the spawn hook before map-ready sees the same answer. nil (unreadable) and false both mean not Endless.
+-- Globals (not locals): the main chunk is near the 200-local limit, and the offline tests read MAP_GATE.
+MAP_GATE = nil
+MAP_GATE_LIVE = nil
+function MapGateStore()
+  local okG, gate = pcall(EndlessGateRead)
+  if not okG or type(gate) ~= "table" then
+    gate = { endless = nil, campaign = "unreadable", mission = "unreadable", row = nil, rowCheck = false }
+  end
+  MAP_GATE = gate
+  return gate
+end
+function EndlessMapNow()
+  local g = MAP_GATE
+  if g == nil then
+    local now = os.time()
+    if MAP_GATE_LIVE == nil or MAP_GATE_LIVE.at ~= now then
+      local okG, r = pcall(EndlessGateRead)
+      MAP_GATE_LIVE = { at = now, gate = (okG and type(r) == "table") and r or nil }
+    end
+    g = MAP_GATE_LIVE.gate
+  end
+  return g ~= nil and g.endless == true
+end
+
 -- Applies the Endless settings once for each coordinator address. Both map-ready places call it, so it dedupes them.
 local function ApplyMapSettings(c)
+  -- #68 M1: settings are an Endless-map action. A campaign map keeps the stock settings.
+  if not EndlessMapNow() then return false end
   local key = MapKey(c)
   if key == MAP_READY.settingsKey then return false end
   MAP_READY.settingsKey = key
@@ -5973,16 +6265,24 @@ local function ApplyMapSettings(c)
 end
 
 do
+  -- #70 L12: one map-ready step. Runs fn in pcall and logs the error. A failed step does not stop the steps after it.
+  local function MapStep(name, fn, ...)
+    local ok, err = pcall(fn, ...)
+    if not ok then print("[Reforged] map-ready step " .. name .. " failed: " .. tostring(err)) end
+    return ok
+  end
+
   -- Map-ready work for one coordinator. Runs on the game thread.
   local function MapReadyFor(c)
     -- REFORGED.ready stays false until this map's Reforged reset below ends. No round is built in between.
     REFORGED.ready = false
     autoTestMapReady = true
     HOOK_TRACE = {}
-    ApplyEndlessMode()
-    AnchorNewMap()
-    ApplyMapSettings(c)
-    PlayerPathReset()
+    MapStep("gate", MapGateStore) -- #68 M1: the gate first. ApplyEndlessMode, the settings and the Reforged reset read it.
+    MapStep("endless-mode", ApplyEndlessMode)
+    MapStep("anchor", AnchorNewMap)
+    MapStep("settings", ApplyMapSettings, c)
+    MapStep("path-reset", PlayerPathReset)
     print("[Reforged] map-ready: breaks-off deferred 15 s so the level can settle")
     if TESTING then After(15000, function() BreaksOff() end) end
     local gi
@@ -5991,9 +6291,11 @@ do
       pcall(function() gi = FindFirstOf("OMDGameInstance") end)
     end
     local missionName = "?"
-    if gi and gi:IsValid() then
-      pcall(function() missionName = gi:GetCurrentMissionLevelName() end)
-    end
+    MapStep("mission-name", function()
+      if gi and gi:IsValid() then
+        pcall(function() missionName = gi:GetCurrentMissionLevelName() end)
+      end
+    end)
     -- A call cut off by a map change must not defer restores on the next load.
     DOOR_PENDING = {}
     -- Nearest path points are per map. A new map starts with no cached point.
@@ -6013,6 +6315,8 @@ do
     end
     PACE.lastCall = 0
     PACE.bypass = false
+    -- #68 M1: the Reforged reset is an Endless-map action. A campaign map keeps REFORGED.ready false (set by map leave).
+    if EndlessMapNow() then
     REFORGED_GAP_MULT = 1
     REFORGED = { round = 0, lastBuild = nil, seed = os.time(), last = nil, inBuild = nil, doorStart = 0, waitAt = nil, ready = false, level = nil }
     REFORGED_STOCK.fellBack = {} -- The stock fallback line prints once per round number and map
@@ -6029,10 +6333,13 @@ do
     pcall(CurveMapReset)
     pcall(ClassicModMapReset)
     REFORGED.ready = true
+    end
     if MAP_READY.claim(c) then
-      pcall(NoScoreUpload, "map-ready")
-      WatchMapReady(missionName)
-      print("[Reforged] auto-test map ready mission-level=" .. tostring(missionName) .. " " .. population(c))
+      MapStep("no-score-upload", NoScoreUpload, "map-ready")
+      MapStep("watch-map-ready", WatchMapReady, missionName)
+      MapStep("population", function()
+        print("[Reforged] auto-test map ready mission-level=" .. tostring(missionName) .. " " .. population(c))
+      end)
     end
   end
 
@@ -6047,11 +6354,16 @@ do
         -- Fallback: without the LoadMap hook, the first pass with no coordinator after a map does the map-leave reset.
         if MAP_READY.mapKey ~= nil and MAP_LEAVE_HOOKED ~= true and ReforgedMapLeave then pcall(ReforgedMapLeave, "no-coordinator") end
         MAP_READY.mapKey, MAP_READY.settingsKey, MAP_READY.lastPrintedKey = nil, nil, nil
+        MAP_GATE = nil -- #68 M1: no map, so the next read is live until the next map-ready
         return
       end
       local key = MapKey(c)
       if key == MAP_READY.mapKey then return end
+      local prevKey = MAP_READY.mapKey
       MAP_READY.mapKey = key
+      -- #70 L11: without the LoadMap pre-hook, MAP_EPOCH did not change at a map change. A new coordinator after a known
+      -- one is a map change, so the epoch steps here. The delayed-job pass drops the old map's jobs. Nothing else is reset.
+      if prevKey ~= nil and MAP_LEAVE_HOOKED ~= true then MAP_EPOCH = (MAP_EPOCH or 0) + 1 end
       MapReadyFor(c)
     end)
   end
@@ -6087,6 +6399,8 @@ local function BreaksRead()
 end
 
 BreaksOff = function()
+  -- #68 M1: breaks-off changes the Endless break counter. It runs on an Endless map only.
+  if not EndlessMapNow() then print("[Reforged] breaks-off skipped: endless-gate off"); return end
   -- Reforged builds each round at a Go Break (HoardReleased reads bIsGoBreakActive). Writing 0 here would turn later breaks timed.
   if QueueBlockMode() == "reforged" then
     print("[Reforged] breaks-off skipped: Reforged keeps Go Breaks (rounds start at G)")
@@ -6281,6 +6595,7 @@ function ReforgedBreakReset()
   BREAK_ORDER.watch, BREAK_ORDER.gs, BREAK_ORDER.offset, BREAK_ORDER.chain = nil, nil, 0, false
   -- Break gate: Reforged loads the DLL once and closes the gate at map ready. Other modes only release a blocked gate.
   if QueueBlockMode() == "reforged" then
+    BuildCheckDegradedLog()
     BreakGateLoad()
     print(string.format("[Reforged] break-gate ready patched=%s err=%s", tostring(BREAK_GATE.patched), tostring(BREAK_GATE.err)))
     BreakGateSet(false, "map-ready")
@@ -6481,6 +6796,7 @@ BREAK_GATE = { loaded = false, patched = false, err = nil, fns = {}, use = true,
 function BreakGateLoad()
   local G = BREAK_GATE
   if G.loaded then return G.patched end
+  if not BuildCheckOk() then G.err = "unknown build"; return false end -- #72 M2: no DLL load, no vtable write
   local cmdPath = WAVE_COMMAND_PATH
   local win64Dir = cmdPath and cmdPath:match("^(.*)/Mods/Reforged/director%.cmd$")
   if not win64Dir then G.err = "no Win64 path"; return false end
@@ -6540,6 +6856,7 @@ function BreakGateCommand(arg1)
 end
 
 -- Endless map loads use the game's own campaign mission flow. The Endless campaign pointer comes from the live game instance. Each mission GUID is the Endless mission proto (<row>_End) from the Endless campaign mission list compare (stock rows). The old start-endless-colosseum GUID was the campaign proto Scenario_17.
+do -- local scope (#69)
 local endlessStartRequested = false
 local mapWatchStarted = false
 local function WatchEndlessMap(gi)
@@ -6619,6 +6936,19 @@ do
     { row = "ServantEntrance_End", guid = "B6232412-0A9F-584B-B16D-A87541EFE134", level = "ServantEntrance", name = "Servant Entrance" },
   }
 
+  -- Campaign War Scenario rows for the developer command launch-campaign (#68 M1). Each row, the campaign that holds it
+  -- (campGuid) and its mission GUID. Mission GUIDs: the Guid of each row in Assets/UAssets/OnslaughtResearch/Missions/
+  -- MissionProtos.json. Campaign GUIDs: docs/endless-only-gate-research-2026-10-21.md section 2.
+  local CAMPAIGN_ROWS = {
+    { row = "Scenario_06_WS", camp = "OMD3_Main_Story", campGuid = "E7C4C85D-4728-DB01-3561-21BB4432241D", mission = "B2CD774F-4D89-64A1-B65A-9D830398D902" },
+    { row = "Scenario_09_WS", camp = "OMD3_Main_Story", campGuid = "E7C4C85D-4728-DB01-3561-21BB4432241D", mission = "F099D440-4FF1-7E4A-7717-29B73FE836EB" },
+    { row = "Scenario_12_WS", camp = "OMD3_Main_Story", campGuid = "E7C4C85D-4728-DB01-3561-21BB4432241D", mission = "3B7FF669-4587-733A-C675-9EB3BC98C7D7" },
+    { row = "Scenario_15_WS", camp = "OMD3_Main_Story", campGuid = "E7C4C85D-4728-DB01-3561-21BB4432241D", mission = "A80CB736-4234-66B3-30B5-66A996B1C2A1" },
+    { row = "Scenario_18_WS", camp = "OMD3_Main_Story", campGuid = "E7C4C85D-4728-DB01-3561-21BB4432241D", mission = "6B83A139-4CD1-E82E-D2A0-B6A6272B5215" },
+    { row = "DLCScenario_03_WS", camp = "DLC3_Main_Story", campGuid = "0678A537-49D2-9266-8615-D69314F08FBB", mission = "F3B63D07-488A-961D-F19B-9891FF82A783" },
+    { row = "Scenario_Sand_03_WS", camp = "DLC_Sand_Campaign", campGuid = "7023C594-4801-ED47-77FD-CBAE8AC08BFA", mission = "31C9EE1D-4A02-2A51-3658-049E80EBC305" },
+  }
+
   local function MissionByRow(row)
     for _, entry in ipairs(MISSIONS) do
       if entry.row == row then return entry end
@@ -6653,6 +6983,49 @@ do
     end
     local s = table.concat(hex)
     return s:sub(1, 8) .. "-" .. s:sub(9, 12) .. "-" .. s:sub(13, 16) .. "-" .. s:sub(17, 20) .. "-" .. s:sub(21, 32)
+  end
+
+  -- Reads a GUID struct through `read` (a function that returns the FGuid). Returns { A, B, C, D } or nil when unreadable.
+  local function GuidWordsRead(read)
+    local ok, out = pcall(function()
+      local g = read()
+      return { A = g.A, B = g.B, C = g.C, D = g.D }
+    end)
+    if not ok or type(out) ~= "table" then return nil end
+    for _, k in ipairs({ "A", "B", "C", "D" }) do
+      if WordOf(out[k]) == nil then return nil end
+    end
+    return out
+  end
+
+  -- Endless gate (#68 M1). Read only: it changes nothing in the game. Primary rule: the campaign of the current match
+  -- (CurrentCampaign) equals the Endless campaign. Second check: the current mission (CurrentMission) is one of the
+  -- MISSIONS rows (row, rowCheck). endless is true, false, or nil when a read fails. Every game read is in pcall.
+  -- Global, so the map-ready code outside this block can call it.
+  function EndlessGateRead()
+    local r = { endless = nil, campaign = "unreadable", endlessCampaign = "unreadable", mission = "unreadable", row = nil, rowCheck = false }
+    local gi
+    pcall(function() gi = FindFirstOf("BP_OMDGameInstance_C") end)
+    if not gi then pcall(function() gi = FindFirstOf("OMDGameInstance") end) end
+    local okV, valid = pcall(function() return gi ~= nil and gi:IsValid() == true end)
+    if not okV or not valid then return r end
+    local campaign = GuidWordsRead(function() return gi.CurrentCampaign.Guid end)
+    local endlessCampaign = GuidWordsRead(function() return gi.EndlessCampaign.Guid end)
+    local mission = GuidWordsRead(function() return gi.CurrentMission.Guid end)
+    r.campaign = GuidWordsText(campaign)
+    r.endlessCampaign = GuidWordsText(endlessCampaign)
+    r.mission = GuidWordsText(mission)
+    if campaign and endlessCampaign then r.endless = GuidWordsEqual(campaign, endlessCampaign) end
+    if mission then
+      for _, entry in ipairs(MISSIONS) do
+        if GuidWordsEqual(mission, GuidFromString(entry.guid)) then
+          r.row = entry.row
+          break
+        end
+      end
+    end
+    r.rowCheck = r.row ~= nil
+    return r
   end
 
   -- Loads one Endless map by its mission row, through the stock campaign flow from the Endless hub.
@@ -6733,10 +7106,94 @@ do
       end
     end)
   end
+
+  -- Developer command `launch-campaign <row>` (#68 M1). Starts a War Scenario campaign row from the Endless hub. It sets
+  -- the row's campaign and mission, reads both back, and calls the hub launch only when both match. It does not set the
+  -- Endless difficulty. Warning: a finished campaign match writes the save (skulls, mission state). Leave with restart-game.sh.
+  function StartCampaignMission(row)
+    local entry
+    for _, e in ipairs(CAMPAIGN_ROWS) do
+      if e.row == row then entry = e break end
+    end
+    if not entry then
+      print("[Reforged] launch-campaign rejected: unknown campaign row " .. tostring(row))
+      return
+    end
+    if endlessStartRequested then
+      print("[Reforged] launch-campaign rejected: a launch is already in progress")
+      return
+    end
+    endlessStartRequested = true
+    local campaign = { Guid = GuidFromString(entry.campGuid) }
+    local mission = { Guid = GuidFromString(entry.mission) }
+    ExecuteInGameThread(function()
+      local gi
+      pcall(function() gi = FindFirstOf("BP_OMDGameInstance_C") end)
+      if not gi or not gi:IsValid() then
+        pcall(function() gi = FindFirstOf("OMDGameInstance") end)
+      end
+      if not gi or not gi:IsValid() then
+        endlessStartRequested = false
+        print("[Reforged] launch-campaign rejected: game instance unavailable")
+        return
+      end
+      if not EndlessHubOpen() then
+        endlessStartRequested = false
+        print("[Reforged] launch-campaign rejected: works only in the Endless hub")
+        return
+      end
+      local hub = gi.CampaignScrnWidget
+      if not hub or not hub:IsValid() then
+        pcall(function() hub = FindFirstOf("HubScreen_UMG_C") end)
+      end
+      if not hub or not hub:IsValid() then
+        endlessStartRequested = false
+        print("[Reforged] launch-campaign failed: Endless campaign hub unavailable")
+        return
+      end
+      local okCampaign, campaignErr = pcall(function() gi:SetCurrentCampaign(campaign) end)
+      local okMission, missionErr = pcall(function() gi:SetCurrentMission(mission) end)
+      print(string.format("[Reforged] launch-campaign set row=%s campaign=%s error=%s mission=%s error=%s",
+        entry.row, tostring(okCampaign), tostring(campaignErr), tostring(okMission), tostring(missionErr)))
+      -- SetCurrentCampaign and SetCurrentMission can do nothing and report no error (#102). Read both back.
+      local curCampaign = GuidWordsRead(function() return gi.CurrentCampaign.Guid end)
+      local curMission = GuidWordsRead(function() return gi.CurrentMission.Guid end)
+      local campOk = GuidWordsEqual(curCampaign, campaign.Guid)
+      local missionOk = GuidWordsEqual(curMission, mission.Guid)
+      print(string.format("[Reforged] launch-campaign row=%s campaign ok=%s mission ok=%s", entry.row, tostring(campOk), tostring(missionOk)))
+      -- M2 (release 0.2.2): a rejection after the campaign set puts the Endless campaign back (the call that launch uses).
+      local function RestoreEndlessCampaign()
+        if not okCampaign then return end
+        local okR = pcall(function() gi:SetCurrentCampaign({ Guid = gi.EndlessCampaign.Guid }) end)
+        print("[Reforged] launch-campaign restored endless campaign ok=" .. tostring(okR))
+      end
+      if not campOk then
+        endlessStartRequested = false
+        print("[Reforged] launch-campaign rejected: campaign not set row=" .. entry.row .. " current=" .. GuidWordsText(curCampaign))
+        RestoreEndlessCampaign()
+        return
+      end
+      if not missionOk then
+        endlessStartRequested = false
+        print("[Reforged] launch-campaign rejected: mission not set row=" .. entry.row .. " current=" .. GuidWordsText(curMission))
+        RestoreEndlessCampaign()
+        return
+      end
+      local okLoad, loadErr = pcall(function() hub:Manual_SinglePlayer_LaunchGame() end)
+      print(string.format("[Reforged] launch-campaign Manual_SinglePlayer_LaunchGame called=%s error=%s",
+        tostring(okLoad), tostring(loadErr)))
+      if okLoad then
+        WatchEndlessMap(gi)
+      else
+        endlessStartRequested = false
+      end
+    end)
+  end
 end
 
 -- Route probe. Fork weights live on OMDPathPoint.NextPoints[].BranchWeight.
 -- route-reload calls the Blueprint UFunction LoadPathFromLevel, which rebuilds the controller's native node list.
+end -- local scope (#69)
 local function RoutePoints()
   local ok, pts = pcall(FindAllOf, "OMDPathPoint")
   if not ok or not pts then return {} end
@@ -6911,13 +7368,22 @@ TICK_HOLD = false
 -- The mode the queue block uses: the saved mode in endless-mode.txt. The native build calls the spawn hook before
 -- the mode is applied, so ENDLESS_MODE can still be classic then. The file is read once per second
 -- (the build makes about 464 calls in one burst). If the read fails, the applied mode is used and not cached.
+-- S1 (release 0.2.2): a map that is not Endless gives "off". Every caller treats "off" as do nothing.
+-- M1 (release 0.2.2): on an unknown game build Manual and Reforged give "classic" (the match runs as Classic).
 function QueueBlockMode()
+  if not EndlessMapNow() then return "off" end
   local now = os.time()
   if QBLOCK.mode ~= nil and QBLOCK.modeAt == now then return QBLOCK.mode end
   local okM, mode = pcall(function() return ReadEndlessMode() end)
-  if not okM or mode == nil then return ENDLESS_MODE end
+  if not okM or mode == nil then return EndlessModeForBuild(ENDLESS_MODE) end
+  mode = EndlessModeForBuild(mode)
   QBLOCK.mode = mode
   QBLOCK.modeAt = now
+  return mode
+end
+-- M1 (release 0.2.2): Manual and Reforged need the known build. An unknown build runs them as Classic.
+function EndlessModeForBuild(mode)
+  if (mode == "manual" or mode == "reforged") and not BuildCheckOk() then return "classic" end
   return mode
 end
 -- The level-load popup. Title is the Endless mode. Line is TEST MODE when test mode is on, else nil.
@@ -6936,6 +7402,7 @@ function ModeBannerStateAddress()
   return nil
 end
 function ModeBannerShow()
+  if not EndlessMapNow() then return nil, nil, false end -- S1 (release 0.2.2): no Endless mode popup on a campaign map
   local okM, mode = pcall(QueueBlockMode)
   if not okM then mode = nil end
   local titles = { classic = "CLASSIC ENDLESS", manual = "MANUAL ENDLESS", reforged = "REFORGED ENDLESS" }
@@ -6968,8 +7435,11 @@ function ModeBannerShow()
   return title, line, shown
 end
 function QueueBlockActive()
+  if not BuildCheckOk() then return false end -- #72 M2: the key offset is measured on known builds only
   local mode = QueueBlockMode()
   if mode == "classic" then return false end
+  -- #68 M1: the queue block runs on an Endless map only. The setting does not force it on a campaign map.
+  if not EndlessMapNow() then return false end
   if QUEUE_BLOCK ~= nil then return QUEUE_BLOCK end
   return mode == "manual" or mode == "reforged"
 end
@@ -7187,7 +7657,13 @@ function ReforgedBreakChainHold()
 end
 
 function TickHold(on)
+  if not BuildCheckOk() then -- #72 M2: the hold byte is measured on known builds only. Silent: the map-ready line says it once.
+    TICK_HOLD = false
+    return
+  end
   if on then
+    -- #68 M1: the tick hold runs on an Endless map only.
+    if not EndlessMapNow() then print("[Reforged] tick-hold refused endless-gate=off"); return end
     if QueueBlockMode() == "classic" then
       print("[Reforged] tick-hold refused mode=classic")
       return
@@ -7229,6 +7705,7 @@ local function TallyPrint()
     EndlessIteration(), req.calls, req.count, req.add, req.promoteMax, tally.n, tostring(endlessAddOverride),
     tostring(endlessPromoteOverride), table.concat(parts, ",")))
 end
+do -- local scope (#69)
 local okSpawnHook, errSpawnHook = SafeRegisterHook("/Script/OMD.OMDOnslaughtCoordinator:OnslaughtSpawnEntities",
   function(self, proto, count, shield, addCount, promote, difficulty)
     HookTrace("OnslaughtSpawnEntities")
@@ -7256,11 +7733,13 @@ local okSpawnHook, errSpawnHook = SafeRegisterHook("/Script/OMD.OMDOnslaughtCoor
       end
       print("[Reforged] spawn-entities raw " .. table.concat(raw, " | "))
     end
-    if endlessAddOverride ~= nil then pcall(function() addCount:set(endlessAddOverride) end) end
-    if endlessPromoteOverride ~= nil then pcall(function() promote:set(endlessPromoteOverride) end) end
+    -- S1 (release 0.2.2): the overrides apply on an Endless map only. A campaign map keeps the native values.
+    if endlessAddOverride ~= nil and EndlessMapNow() then pcall(function() addCount:set(endlessAddOverride) end) end
+    if endlessPromoteOverride ~= nil and EndlessMapNow() then pcall(function() promote:set(endlessPromoteOverride) end) end
     QueueBlockSwap(self)
   end, function() QueueBlockRestore() end)
 print("[Reforged] OnslaughtSpawnEntities hook registered=" .. tostring(okSpawnHook) .. " " .. tostring(errSpawnHook))
+end -- local scope (#69)
 do
   local okFormation = SafeRegisterHook("/Script/OMD.OMDOnslaughtCoordinator:OnslaughtSpawnEntitiesFormation",
     function(self) QueueBlockSwap(self) end, function() QueueBlockRestore() end)
@@ -7738,6 +8217,7 @@ end
 -- The hooks are registered only by `dmg-probe on`. Every crash today followed `testing on`. Symbolized UE4SS
 -- frames show Lua touching a game object that may be gone. Cause inferred. The causer is not read; every call counts under "?".
 local dmgCalls = { n = 0, byCauser = {}, on = false }
+do -- local scope (#69)
 local function DmgHook(path, baseIdx)
   local ok, err = SafeRegisterHook(path, function(self, ...)
     if not TESTING then return end
@@ -7764,6 +8244,7 @@ function DmgProbeOn()
   DmgHook("/Script/OMD.OMDGameplayStatics:ApplyPointDamage", 2)
   DmgHook("/Script/OMD.OMDGameplayStatics:ApplyRadialDamage", 2)
 end
+end -- local scope (#69)
 local function DmgRead()
   local parts = {}
   for causer, r in pairs(dmgCalls.byCauser) do parts[#parts + 1] = string.format("%s n=%d base=%.1f..%.1f", causer, r.n, r.lo, r.hi) end
@@ -7792,7 +8273,9 @@ local function CoordinatorClass()
 end
 -- Read-only status line for the game-master panel, printed every 4 s while a coordinator exists. The panel reads it from the log,
 -- so the dashboard needs no command. One line, fixed key=value fields.
+do -- local scope (#69)
 local function PanelStatus()
+  if TESTING ~= true then return end -- #71 M2: the panel line is a test-only line
   local c = coordinator()
   if not c then return end
   local function num(fn) local ok, v = pcall(fn); return ok and tostring(v) or "?" end
@@ -7835,6 +8318,7 @@ GameLoop(4000, function() PanelStatus(); return false end)
 PERF = { on = false, lite = false, lastWave = nil, gameplayStatics = nil, kismet = nil, lastReal = nil, lastFrames = nil, noteFrames = false, lastPawns = {} }
 PERF_EXTRA = { "ProjectileMovementComponent" }
 -- Counts valid objects of a class. nil from FindAllOf means no object of that class: 0. A failed call: "?".
+end -- local scope (#69)
 local function PerfCount(className)
   local ok, n = pcall(function()
     local list = FindAllOf(className)
@@ -7951,6 +8435,7 @@ local function PerfKismet()
   end
   return PERF.kismet
 end
+do -- local scope (#69)
 local function PerfFrameCount()
   local k = PerfKismet()
   if not k then return nil end
@@ -7994,6 +8479,8 @@ function PERF.dt(c)
   if frames and real then PERF.lastFrames = frames; PERF.lastReal = real end
   return dtMean, dtMax, samples
 end
+end -- local scope (#69)
+do -- local scope (#69)
 local function PerfTick()
   local wave = PerfWave()
   local iter = EndlessIteration()
@@ -8043,6 +8530,7 @@ GameLoop(1000, function() if PERF.on then PerfTick() end; return false end)
 -- branch, the second branch, or the stock weights again. The stock weights are remembered the first time a fork is changed.
 -- Measured on Colosseum: weights 100/0 sent every sampled orc to the chosen branch. Maps with no fork report forks=0.
 ROUTE_STOCK = ROUTE_STOCK or {}
+end -- local scope (#69)
 local function RoutePrefer(mode)
   local forks = 0
   for _, p in ipairs(RoutePoints()) do
@@ -8089,6 +8577,7 @@ local function GoblinPlayerCoin()
   local ok, c = pcall(function() return pc:GetCoin() end)
   return pc, ok and tonumber(c) or nil
 end
+do -- local scope (#69)
 local function GoblinPay(g, drop)
   local pc, before = GoblinPlayerCoin()
   if not pc then print("[Reforged] loot-goblin hit: no player controller"); return end
@@ -8121,6 +8610,7 @@ GameLoop(250, function() if #goblins > 0 then GoblinTick() end; return false end
 -- The in-game effect is unmeasured until a UE4SS.log line measures it.
 if PAWN_STRIP == nil then PAWN_STRIP = false end
 if PAWN_STRIPPED == nil then PAWN_STRIPPED = {} end
+end -- local scope (#69)
 local PAWN_STRIP_FIELDS = { "FXMesh", "Skeleton", "Decal" }
 
 -- Returns the valid component objects of one pawn. Each read is in a pcall. Nil and invalid values are skipped.
@@ -8146,6 +8636,7 @@ local function PawnStripSetTick(actor, enable)
 end
 
 -- Runs on the game thread, once per loop pass while PAWN_STRIP is on. Skips pawns already in PAWN_STRIPPED.
+do -- local scope (#69)
 local function PawnStripPass()
   if not PAWN_STRIP then return end
   local newCount, ok, fail = 0, 0, 0
@@ -8169,6 +8660,7 @@ GameLoop(2000, function()
 end)
 
 -- Runs on the game thread. Turns tick back on for each live pawn in PAWN_STRIPPED, then clears PAWN_STRIPPED.
+end -- local scope (#69)
 local function PawnStripRestore()
   local pawns, ok, fail = 0, 0, 0
   for _, e in ipairs(LiveNonWispAI()) do
@@ -8208,6 +8700,7 @@ local function PawnCollideSetResponse(capsule, response)
 end
 
 -- Runs on the game thread, once per loop pass while PAWN_COLLIDE_OFF is true. Skips pawns already in PAWN_COLLIDE_DONE.
+do -- local scope (#69)
 local function PawnCollidePass()
   if not PAWN_COLLIDE_OFF then return end
   local newCount, ok, fail = 0, 0, 0
@@ -8230,6 +8723,7 @@ GameLoop(2000, function()
 end)
 
 -- Runs on the game thread. Sets ECR_Block (2) on the capsule of each live pawn in PAWN_COLLIDE_DONE, then clears it.
+end -- local scope (#69)
 local function PawnCollideRestore()
   local pawns, ok, fail = 0, 0, 0
   for _, e in ipairs(LiveNonWispAI()) do
@@ -8245,7 +8739,7 @@ end
 -- Developer commands: rejected unless TESTING is on.
 local DEV_OPS = {}
 for _, v in ipairs({ "class-props", "probe", "sweep", "feign", "distinct", "profile-run", "profile-stop",
-  "goblin-status", "goblin-coins", "goblin-hit", "coin-give", "spawn-center", "stat-sample", "tally", "tally-reset", "behavior", "bt-probe", "bt-probe-load", "ai-perf", "cvar", "pawn-flags", "pawn-strip", "pawn-collide", "coord-spawn-pos", "coord-queue", "proto-pass", "anchor-boot", "anchor-hold", "anchor-hold-mode", "anchor-release", "anchor-status", "anchor-health", "anchor-auto", "anchor-min-dist", "cspawn", "play-list", "queue-block", "tick-hold", "spawn-pace", "reforged-plan", "reforged-round", "reforged-round-next", "modifier", "dmg-probe", "break-mode", "break-order", "break-gate", "preview", "dm-list", "hurt-player", "wisp-probe", "wisp-clear", "moneybags-kill", "curve", "difficulty", "banner", "rift-move", "look", "walk", "push", "watch-hits" }) do DEV_OPS[v] = true end
+  "goblin-status", "goblin-coins", "goblin-hit", "coin-give", "spawn-center", "stat-sample", "tally", "tally-reset", "behavior", "bt-probe", "bt-probe-load", "ai-perf", "cvar", "pawn-flags", "pawn-strip", "pawn-collide", "coord-spawn-pos", "coord-queue", "proto-pass", "anchor-boot", "anchor-hold", "anchor-hold-mode", "anchor-release", "anchor-status", "anchor-health", "anchor-auto", "anchor-min-dist", "cspawn", "play-list", "queue-block", "tick-hold", "spawn-pace", "reforged-plan", "reforged-round", "reforged-round-next", "modifier", "dmg-probe", "break-mode", "break-order", "break-gate", "preview", "dm-list", "hurt-player", "wisp-probe", "wisp-clear", "moneybags-kill", "curve", "difficulty", "banner", "rift-move", "look", "walk", "push", "watch-hits", "launch-campaign" }) do DEV_OPS[v] = true end
 
 local function SetTesting(on)
   if on and not TESTING then
@@ -8303,6 +8797,7 @@ function TestModeSet(on, source)
     if not okT then print("[Reforged] test-mode SetTesting err=" .. tostring(errT)) end
     RIFT_TARGET = 1000
     TEST_MODE = true
+    WatchStreamSync() -- #71 M2: before the event, so the test-mode on event is written
   else
     local okT, errT = pcall(SetTesting, false)
     if not okT then print("[Reforged] test-mode SetTesting err=" .. tostring(errT)) end
@@ -8311,6 +8806,7 @@ function TestModeSet(on, source)
   end
   print(string.format("[Reforged] test-mode on=%s source=%s", tostring(on), tostring(source)))
   WatchEmit("test-mode", { on = on, source = tostring(source) })
+  if not on then WatchStreamSync() end -- #71 M2: after the event, so the test-mode off event is written
   pcall(SetModeText, ReadEndlessMode())
 end
 
@@ -8475,6 +8971,7 @@ ANCHOR_KEEP_COLLISION = true -- True keeps the anchor collision on (the stuck pr
 ANCHOR_STUCK_DELAY = 1000000.0 -- seconds written to the controller stuck timeout (ReforgedStuckDelay, offset 0x650) at hold.
 
 do
+do -- local scope (#69)
 local function ErrStr(e)
   local ok, s = pcall(tostring, e)
   if ok then return s end
@@ -8649,7 +9146,7 @@ end
 
 -- Stuck timeout. The controller's stuck timer fires after +0x650 seconds (20.0 by default). Registered at load.
 do
-  local okT = PropertyTypes ~= nil and PropertyTypes.FloatProperty ~= nil
+  local okT = PropertyTypes ~= nil and PropertyTypes.FloatProperty ~= nil and BuildCheckOk()
   local okR = false
   if okT then
     okR = pcall(RegisterCustomProperty, {
@@ -8657,25 +9154,25 @@ do
       BelongsToClass = "/Script/OMD.OMDAIController", OffsetInternal = 0x650,
     })
   end
-  print("[Reforged] anchor stuck-delay registered=" .. tostring(okR))
+  print("[Reforged] anchor stuck-delay registered=" .. tostring(okR) .. (BuildCheckOk() and "" or " reason=build"))
 end
 
 -- Queue block properties. ReforgedSpawnKey is the spawner key at +0x3ec; ReforgedHold is the tick hold byte at +0x3f4.
 do
   local okK, okH = false, false
-  if PropertyTypes ~= nil and PropertyTypes.IntProperty ~= nil then
+  if PropertyTypes ~= nil and PropertyTypes.IntProperty ~= nil and BuildCheckOk() then
     okK = pcall(RegisterCustomProperty, {
       Name = "ReforgedSpawnKey", Type = PropertyTypes.IntProperty,
       BelongsToClass = "/Script/OMD.OMDOnslaughtCoordinator", OffsetInternal = 0x3ec,
     })
   end
-  if PropertyTypes ~= nil and PropertyTypes.ByteProperty ~= nil then
+  if PropertyTypes ~= nil and PropertyTypes.ByteProperty ~= nil and BuildCheckOk() then
     okH = pcall(RegisterCustomProperty, {
       Name = "ReforgedHold", Type = PropertyTypes.ByteProperty,
       BelongsToClass = "/Script/OMD.OMDOnslaughtCoordinator", OffsetInternal = 0x3f4,
     })
   end
-  print("[Reforged] queue-block registered key=" .. tostring(okK) .. " hold=" .. tostring(okH))
+  print("[Reforged] queue-block registered key=" .. tostring(okK) .. " hold=" .. tostring(okH) .. (BuildCheckOk() and "" or " reason=build"))
 end
 
 -- Object helpers for the hold. Each one reads a UObject with pcall and returns nil or false when it cannot.
@@ -8766,7 +9263,7 @@ local function AnchorGuardTick()
   local def = CtrlRead(g.ctrl, "bIsRunningDefaultBehavior")
   if g.mode == "tree" and def == true and g.ctrl and g.tree then
     local okT, errT = pcall(function() g.ctrl:SetTempBehavior(g.tree) end)
-    local okW = pcall(function() g.ctrl.ReforgedStuckDelay = ANCHOR_STUCK_DELAY end)
+    local okW = BuildCheckOk() and pcall(function() g.ctrl.ReforgedStuckDelay = ANCHOR_STUCK_DELAY end)
     if okT then
       print("[Reforged] anchor-guard reapplied tree (default behavior came back)")
     else
@@ -8873,6 +9370,7 @@ local function HoldAnchor()
   local stuckCtrl = ctrl or AnchorController()
   Step("stuck-delay", function()
     if not stuckCtrl then error("no controller") end
+    if not BuildCheckOk() then return end -- #72 M2: the stuck delay is off on an unknown build
     stuckCtrl.ReforgedStuckDelay = ANCHOR_STUCK_DELAY
     print("[Reforged] anchor-hold stuck-delay read=" .. tostring(stuckCtrl.ReforgedStuckDelay))
   end)
@@ -9192,6 +9690,7 @@ end
 -- player-path: developer test tool. Moves the player pawn to a spot in front of the enemy path and sets its
 -- aggro bit, so enemies can target it. Acts only when TESTING is on (DEV_OPS). It moves the player and sets the aggro
 -- bit while on; it does not change other Classic rules. Game calls are pcall'd; the hold loop uses GameLoop.
+end -- local scope (#69)
 do
   DEV_OPS["player-path"] = true
   local PP_DRIFT = 200.0
@@ -9623,6 +10122,7 @@ do
   -- One pass (game thread, after ReforgedBreakStep). Starts the round's wave when the build break is open, repeats it in
   -- wait mode, and clears the auto wisps when combat starts. Outside Reforged, or with preview off, it only clears.
   function ReforgedWispStep()
+    if not EndlessMapNow() then return end -- S1 (release 0.2.2): no preview wisps on a campaign map
     local mode = QueueBlockMode()
     if mode ~= "reforged" or REFORGED_PREVIEW ~= true then
       if REFORGED.wispRound ~= nil then ReforgedWispClearAuto(mode ~= "reforged" and "mode" or "preview-off") end
@@ -9676,6 +10176,7 @@ local function DispatchCommand(line)
       -- `testing on` is full testing. `testing off` also ends test mode.
       TESTING_LIGHT = false
       if arg1 == "off" then TEST_MODE = false end
+      WatchStreamSync() -- #71 M2
     else print("[Reforged] testing=" .. tostring(TESTING)) end
   elseif op == "settings-reload" then
     local okS, errS = pcall(SettingsReload)
@@ -9694,8 +10195,7 @@ local function DispatchCommand(line)
   elseif op == "play-list" then
     GameNow(PlayUiList)
   elseif op == "watch" then
-    if arg1 == "on" then WATCH_ON = true
-    elseif arg1 == "off" then WATCH_ON = false
+    if arg1 == "on" or arg1 == "off" then WatchStreamSet(arg1 == "on", "command")
     else print("[Reforged] watch rejected: use watch on|off"); return end
     print("[Reforged] watch=" .. (WATCH_ON and "on" or "off") .. " file=" .. tostring(WatchFilePath()))
   elseif op == "watch-hits" then
@@ -9909,6 +10409,8 @@ local function DispatchCommand(line)
     StartEndlessMission("Scenario_17_End")
   elseif op == "launch" then
     StartEndlessMission(arg1)
+  elseif op == "launch-campaign" then
+    StartCampaignMission(arg1)
   elseif op == "banner" then
     -- Developer command: the text is the rest of the line, so it can hold spaces.
     HudBannerShow(line:match("^%s*banner%s+(.-)%s*$") or "", nil)
@@ -9924,14 +10426,26 @@ local function DispatchCommand(line)
     if QueueBlockMode() == "classic" then
       print("[Reforged] command rejected: endless-add changes enemy stats and is not allowed in Classic (#55)")
     else
-      if arg1 == "stock" then endlessAddOverride = nil else endlessAddOverride = math.floor(tonumber(arg1) or 0) end
+      -- #70 L14: a finite number from 0 up. Negative, infinite, NaN and non-numeric values are rejected.
+      local n = tonumber(arg1)
+      if arg1 == "stock" then endlessAddOverride = nil
+      elseif n == nil or n ~= n or n == math.huge or n == -math.huge or n < 0 then
+        print("[Reforged] command rejected: endless-add needs stock or a finite number from 0 up")
+        return
+      else endlessAddOverride = math.floor(n) end
       print("[Reforged] endless-add override=" .. tostring(endlessAddOverride))
     end
   elseif op == "endless-promote" then
     if QueueBlockMode() == "classic" then
       print("[Reforged] command rejected: endless-promote changes enemy stats and is not allowed in Classic (#55)")
     else
-      if arg1 == "stock" then endlessPromoteOverride = nil else endlessPromoteOverride = tonumber(arg1) or 0 end
+      -- #70 L14: a finite number from 0 up. Negative, infinite, NaN and non-numeric values are rejected.
+      local n = tonumber(arg1)
+      if arg1 == "stock" then endlessPromoteOverride = nil
+      elseif n == nil or n ~= n or n == math.huge or n == -math.huge or n < 0 then
+        print("[Reforged] command rejected: endless-promote needs stock or a finite number from 0 up")
+        return
+      else endlessPromoteOverride = n end
       print("[Reforged] endless-promote override=" .. tostring(endlessPromoteOverride))
     end
   elseif op == "placement-open" then
@@ -11582,6 +12096,7 @@ do
   end
 end
 
+do -- local scope (#69)
 local function StepSpawn(door, row, count)
   DoorSpawn(door, row, count)
 end
@@ -11591,7 +12106,9 @@ end
 -- Each step is one door call (door index, AI proto, count 1-10) at atSeconds after the command. The file is checked before
 -- anything runs; any error rejects the whole file. Steps on one door must be at least 10 s apart.
 local function JsonDecode(str)
-  local pos = 1
+  -- #70 L15: a UTF-8 byte order mark (EF BB BF) at the start is skipped. A null in an array is stored as false,
+  -- so the slot stays and later items keep their index. The step checks reject a false step.
+  local pos = (str:sub(1, 3) == "\239\187\191") and 4 or 1
   local function ws() pos = str:find("[^ \t\r\n]", pos) or #str + 1 end
   local value
   local function fail(msg) error(string.format("JSON error at byte %d: %s", pos, msg), 0) end
@@ -11632,7 +12149,9 @@ local function JsonDecode(str)
       pos = pos + 1; ws()
       if str:sub(pos, pos) == "]" then pos = pos + 1; return arr end
       while true do
-        arr[#arr + 1] = value(); ws()
+        local item = value()
+        if item == nil then item = false end -- #70 L15: keep the null slot
+        arr[#arr + 1] = item; ws()
         local d = str:sub(pos, pos); pos = pos + 1
         if d == "]" then return arr end
         if d ~= "," then fail("expected , or ]") end
@@ -11693,7 +12212,7 @@ RunWaveFile = function(name)
     local row, door, count = PROTO_BY_NAME[st.proto], st.door, st.count
     After(st.atSeconds * 1000, function() StepSpawn(door, row, count) end)
   end
-  print(string.format("[Reforged] wave-file scheduled name=%s steps=%d requested_total=%d last_step_at=%ds", name, #doc.steps, total, latest))
+  print(string.format("[Reforged] wave-file scheduled name=%s steps=%d requested_total=%d last_step_at=%gs", name, #doc.steps, total, latest))
 end
 
 
@@ -11744,7 +12263,7 @@ RunProfile = function(name)
     end
     print(string.format("[Reforged] profile wave start name=%s wave=%d of %d requested=%d", name, state.idx, #plan, w.total))
   end
-  print(string.format("[Reforged] profile scheduled name=%s waves=%d requested_total=%d breakSeconds=%d", name, #plan, grand, brk))
+  print(string.format("[Reforged] profile scheduled name=%s waves=%d requested_total=%d breakSeconds=%g", name, #plan, grand, brk))
   startNext()
 end
 ProfileStop = function()
@@ -11918,9 +12437,11 @@ do
         S.WhenPlayable(row.key, function()
           local want = v == "on"
           if TESTING ~= want then SetTesting(want) end
+          WatchStreamSync() -- #71 M2: testing sets the stream source
         end)
       end },
-    { key = "watch", group = "developer", type = "enum", values = S.onoff, dflt = "on", apply = function(v) WATCH_ON = v == "on" end },
+    { key = "watch", group = "developer", type = "enum", values = S.onoff, dflt = "off", modes = { classic = true, manual = true, reforged = true },
+      apply = function(v) WATCH_SETTING = v; WatchStreamSync() end },
     { key = "watchTrackMs", group = "developer", type = "int", min = 500, max = 60000, extra = "off", dflt = 2000,
       apply = function(v) WATCH_TRACK_MS = v == "off" and 0 or v end },
     { key = "perf", group = "developer", type = "enum", values = S.onoff, dflt = "off", apply = function(v)
@@ -12226,18 +12747,26 @@ do
     doc.formatVersion = 1
     doc[key] = value
     local tmp = path .. ".tmp"
-    local okW, werr = pcall(function()
-      local out, err = io.open(tmp, "w")
-      if not out then error(err) end
-      out:write(WatchJson(doc) .. "\n")
-      out:close()
-    end)
-    if not okW then
-      print("[Reforged] setting save failed " .. key .. ": " .. tostring(werr))
+    -- #70 L22: encode first. The handle is closed on every path after it opens (a failed write or close removes tmp).
+    local okE, text = pcall(WatchJson, doc)
+    if not okE then
+      print("[Reforged] setting save failed " .. key .. ": " .. tostring(text))
       return false
     end
-    os.remove(path)
-    local renamed, rerr = os.rename(tmp, path)
+    local out, oerr = io.open(tmp, "w")
+    if not out then
+      print("[Reforged] setting save failed " .. key .. ": " .. tostring(oerr))
+      return false
+    end
+    local wok = out:write(text .. "\n")
+    local cok, cerr = out:close()
+    if not wok or not cok then
+      pcall(os.remove, tmp)
+      print("[Reforged] setting save failed " .. key .. ": " .. tostring(cerr or "write failed"))
+      return false
+    end
+    -- #70 L21: the new file replaces the old one by rename (ReplaceFileAtomic).
+    local renamed, rerr = ReplaceFileAtomic(tmp, path)
     if not renamed then
       print("[Reforged] setting save failed " .. key .. ": " .. tostring(rerr))
       return false
@@ -12416,7 +12945,8 @@ do
       return obj, obj:GetFullName(), selectType:get()
     end)
     if not okR then
-      print("[Reforged] options change failed: " .. tostring(full))
+      -- #70 L28: on a failed pcall the error text is the second return (c), not full.
+      print("[Reforged] options change failed: " .. tostring(c))
       return
     end
     local okT, display = pcall(function() return selectedItem:get():ToString() end)
@@ -12782,6 +13312,7 @@ end
 -- The LoadMap pre-hook runs before that free. It empties every per-map table that holds an actor, sets REFORGED.ready to
 -- false (no round and no gate block until MapReadyFor), opens the break gate, and adds 1 to MAP_EPOCH.
 -- Globals only, inside do ... end, so the main chunk gets no new locals.
+end -- local scope (#69)
 do
   function ReforgedMapLeave(why)
     MAP_EPOCH = (MAP_EPOCH or 0) + 1
@@ -12789,6 +13320,8 @@ do
     HOARD_HELD, PACE_QUEUE, DOOR_PENDING = {}, {}, {}
     REFORGED_BOSSES_LIVE, REFORGED_BEARERS, REFORGED_WISPS = {}, {}, {}
     REFORGED.wispRound, REFORGED.wispKinds, REFORGED.wispMode = nil, nil, nil
+    -- S1 (release 0.2.2): the round and the preview of the last Endless match do not carry to a campaign map.
+    REFORGED.round, REFORGED.previewRound, REFORGED.previewPhase, REFORGED.previewList = 0, nil, nil, nil
     REFORGED_RULES.mb, REFORGED_RULES.riftLocs = {}, nil
     REFORGED.mapBossPending = nil
     waveTrack.active, waveTrack.pawns = false, {}
@@ -12804,6 +13337,7 @@ do
     pcall(WatchMapLeave)
     -- The next map runs MapReadyFor even when its coordinator gets the old address.
     MAP_READY.mapKey, MAP_READY.settingsKey, MAP_READY.lastPrintedKey = nil, nil, nil
+    MAP_GATE = nil -- #68 M1: the gate of the old map is dropped; the next map-ready stores its own
     print(string.format("[Reforged] map-leave why=%s epoch=%d", tostring(why), MAP_EPOCH))
   end
   if type(RegisterLoadMapPreHook) == "function" then
@@ -12823,6 +13357,28 @@ if COMMAND_PATH then
   print("[Reforged] director command path=" .. COMMAND_PATH)
 else
   print("[Reforged] director command path unavailable from IterateGameDirectories")
+end
+-- #71 M2: the `watch` key of settings.json, read once at load. The path is known only here. Silent: the row apply prints at map-ready.
+do
+  local path = WAVE_COMMAND_PATH and (WAVE_COMMAND_PATH:gsub("director%.cmd$", "settings.json"))
+  local okR, text = pcall(function()
+    local fh = path and io.open(path, "r")
+    if not fh then return nil end
+    local s = fh:read("*a")
+    fh:close()
+    return s
+  end)
+  -- settings.json is a flat object. JsonDecode is not in scope here (it is a local declared further down), so a pattern reads the key.
+  local value = okR and text and text:match('"watch"%s*:%s*"(%a+)"')
+  if value == "on" then WATCH_SETTING = "on" end
+  WatchStreamSync()
+end
+-- #72 M2: the build check event. The stream state is known only after the watch key above. WatchEmit is silent when off.
+if BUILD_CHECK ~= nil then
+  WatchEmit("build", {
+    known = BUILD_CHECK.known, marker = BUILD_CHECK.marker or "?", label = BUILD_CHECK.label or "-",
+    override = BUILD_CHECK.override, err = BUILD_CHECK.err or "nil",
+  })
 end
 local COMMAND_WORKING_PATH = COMMAND_PATH and (COMMAND_PATH .. ".working") or nil
 local function PollDirectorCommand()
@@ -12857,4 +13413,21 @@ DIAG_STARTED = true
 for _, fn in ipairs(DIAG) do pcall(fn) end
 
 StartWaveMonitor()
+-- Build version (#104 M3). install.sh and start.bat copy the release VERSION file to Mods/Reforged/. A repo install has none: dev.
+do
+  local ver, commit = "dev", "?"
+  pcall(function()
+    local path = WAVE_COMMAND_PATH and (WAVE_COMMAND_PATH:gsub("director%.cmd$", "VERSION"))
+    local fh = path and io.open(path, "r")
+    if not fh then return end
+    local text = fh:read("*a") or ""
+    fh:close()
+    local first = text:match("^[^\r\n]*")
+    local second = text:match("^[^\r\n]*\r?\n([^\r\n]*)")
+    if first and first ~= "" then ver = first end
+    local sha = second and second:match("^commit%s+(%S+)")
+    if sha then commit = sha end
+  end)
+  print("[Reforged] version=" .. ver .. " commit=" .. commit)
+end
 print("[Reforged] wave director ready: command file supports spawn, random, mix, wave-amount, wave-class, spawn-at, probe, proto-check, inspect-protos, inspect-doors, status, placement-open, hoard-gate, hook-trace; testing=off (send `testing on` for the developer features)")

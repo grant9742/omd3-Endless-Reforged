@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.2 (2026-10-21)
+
+### Changed
+
+- The mod acts only on Endless maps. On a campaign, weekly or DLC campaign map
+  it does not change the waves, the difficulty, the build breaks or the Rift.
+  It still blocks score uploads on every map.
+- The mod checks the game build at start. On a game build it does not know (for
+  example after a game update), it turns off the Reforged features that depend on
+  that build (the wave hold, the break gate, the anchor delay and the Moneybags
+  rewards) instead of risking a crash. Classic is not changed.
+- The UE4SS cheat manager and console mods are off.
+- The mod writes its version to `ue4ss/UE4SS.log` at start. The install copies the
+  `VERSION` file to `Mods/Reforged/`.
+
+### Fixed
+
+- Less work per frame: the mod writes no developer log stream on a player
+  install, and it scans the doors, the Rift, the enemy targets and the custom-map
+  path points less often.
+- The wall torches on Well That's Orcward and Servant Entrance sit against the
+  wall.
+- A settings file saved with a byte order mark loads. Settings saves are atomic.
+  One failed step at map start no longer stops the steps after it.
+- Linux `start.sh` says "The game is running" only when the game runs.
+
 ## 0.2.1 (2026-10-21)
 
 ### Fixed

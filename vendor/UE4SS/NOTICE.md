@@ -1,6 +1,6 @@
 # UE4SS experimental v3.0.1-1181 (git 83330635)
 
-Unmodified runtime files from <https://github.com/UE4SS-RE/RE-UE4SS>, the `experimental-latest` prerelease asset `UE4SS_v3.0.1-1181-g83330635.zip` (asset updated 2026-10-17T16:38Z, sha256 `b9a166a756605b21058a64cde93bcaab1a855dba3553e5c7e6ce0fa8fdfad7b9`). MIT license (`ue4ss/LICENSE`).
+Runtime files from <https://github.com/UE4SS-RE/RE-UE4SS>, the `experimental-latest` prerelease asset `UE4SS_v3.0.1-1181-g83330635.zip` (asset updated 2026-10-17T16:38Z, sha256 `b9a166a756605b21058a64cde93bcaab1a855dba3553e5c7e6ce0fa8fdfad7b9`). MIT license (`ue4ss/LICENSE`). One change: in `ue4ss/Mods/mods.txt` and `ue4ss/Mods/mods.json` the built-in CheatManagerEnablerMod, ConsoleEnablerMod and ConsoleCommandsMod are turned off (Reforged 0.2.2). The other files are unmodified.
 
 Layout in the game folder (`OMD/Binaries/Win64/`):
 - `dwmapi.dll` (the proxy that loads UE4SS under Proton with `WINEDLLOVERRIDES="dwmapi=n,b"`)

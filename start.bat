@@ -60,6 +60,8 @@ for %%f in (%SRC%\Scripts\*.lua) do >> "%WIN%\.reforged-manifest" echo ue4ss/Mod
 if exist "%SRC%\waves\*.json" for %%f in (%SRC%\waves\*.json) do >> "%WIN%\.reforged-manifest" echo Mods/Reforged/waves/%%~nxf
 rem Packs (#93): each Mods\Reforged\paks\*.pak goes to OMD\Content\Paks\Mods\. The manifest path is relative to WIN.
 if exist "%PAKSRC%\*.pak" for %%f in (%PAKSRC%\*.pak) do >> "%WIN%\.reforged-manifest" echo ../../Content/Paks/Mods/%%~nxf
+rem Build version (#104 M3): a release folder holds VERSION at its top. Its manifest path is relative to WIN.
+if exist "VERSION" >> "%WIN%\.reforged-manifest" echo Mods/Reforged/VERSION
 copy /y "%U%\dwmapi.dll" "%WIN%\dwmapi.dll" >nul
 xcopy /e /i /y "%U%\ue4ss" "%WIN%\ue4ss" >nul
 mkdir "%WIN%\ue4ss\Mods\Reforged\Scripts" 2>nul
@@ -68,6 +70,7 @@ copy /y "%SRC%\Scripts\*.lua" "%WIN%\ue4ss\Mods\Reforged\Scripts\" >nul
 copy /y "%SRC%\Scripts\reforged_gate.dll" "%WIN%\ue4ss\Mods\Reforged\Scripts\" >nul
 mkdir "%WIN%\Mods\Reforged\waves" 2>nul
 if exist "%SRC%\waves\*.json" copy /y "%SRC%\waves\*.json" "%WIN%\Mods\Reforged\waves\" >nul
+if exist "VERSION" copy /y "VERSION" "%WIN%\Mods\Reforged\" >nul
 if exist "%PAKSRC%\*.pak" mkdir "%WIN%\..\..\Content\Paks\Mods" 2>nul
 if exist "%PAKSRC%\*.pak" copy /y "%PAKSRC%\*.pak" "%WIN%\..\..\Content\Paks\Mods\" >nul
 echo Installed. Manifest: %WIN%\.reforged-manifest

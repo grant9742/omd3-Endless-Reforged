@@ -20,13 +20,26 @@ esac
 
 [ -d "$WIN" ] || { echo "Game folder not found: $WIN" >&2; echo "Set OMD3_GAME_DIR to the folder that contains OMD/." >&2; exit 1; }
 
+# game_running: true when the game process runs. pgrep -f only narrows the list. The game is a pid whose argv[0]
+# basename is the game exe. This drops a shell that names the game, and this script and its parent (#104 M3).
+game_running() {
+  local pid argv0
+  for pid in $(pgrep -f 'OMD-Win64-Shipping' 2>/dev/null || true); do
+    if [[ "$pid" == "$$" || "$pid" == "$PPID" ]]; then continue; fi
+    IFS= read -r -d '' argv0 < "/proc/$pid/cmdline" 2>/dev/null || continue
+    argv0="${argv0##*[\\/]}"
+    if [[ "$argv0" == "OMD-Win64-Shipping.exe" ]]; then return 0; fi
+  done
+  return 1
+}
+
 case "$cmd" in
 install)
   # install.sh handles a fresh install, an update and the old layouts.
   OMD3_GAME_DIR="$GAME" Mods/Reforged/install.sh install --yes
   echo 'Linux: set the Steam launch option WINEDLLOVERRIDES="dwmapi=n,b" %command%'
   echo "Start the game. The mod loads at the next game start."
-  if pgrep -f OMD-Win64-Shipping.exe >/dev/null 2>&1; then
+  if game_running; then
     echo "The game is running. Restart it to load the new files."
   fi ;;
 rollback)

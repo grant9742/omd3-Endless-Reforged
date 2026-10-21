@@ -857,20 +857,40 @@ end
 
 -- Enemy routes (#97 M3, "stock"). Each new enemy pawn with a controller gets LoadPathFromLevel() and, when the map
 -- has a start point, SetStartPoint(start). The controller is not swapped. SetStartPoint is never called with nil.
-local function PathOrcs()
-  -- All start points, with their 2D location (#98 M2). A pawn takes the nearest one.
+-- All start points, with their 2D location (#98 M2). M3 (release audit): scanned once per world. The cache is kept while
+-- every cached point is valid (IsValid). A scan with no start point is not cached, so the next call scans again.
+local function StartPoints()
+  local cache = S.starts
+  if cache then
+    local valid = true
+    for _, s in ipairs(cache) do
+      local okV, v = pcall(function() return s.pt:IsValid() end)
+      if not (okV and v == true) then valid = false break end
+    end
+    if valid then return cache end
+  end
   local starts = {}
   for _, pt in ipairs(FindAllOf("OMDPathPoint") or {}) do
+    local okV, isValid = pcall(function() return pt:IsValid() end)
     local ok, isStart = pcall(function() return pt.bIsStartPoint end)
-    if ok and isStart == true then
+    if okV and isValid == true and ok and isStart == true then
       local okP, l = pcall(function() return pt:K2_GetActorLocation() end)
       if okP and l then starts[#starts + 1] = { x = l.X, y = l.Y, pt = pt } end
     end
   end
+  if #starts > 0 then S.starts = starts end
+  return starts
+end
+
+-- A pawn takes the nearest start point (#98 M2).
+local function PathOrcs()
+  local starts = StartPoints()
+  local live = {}
   for _, pawn in ipairs(FindAllOf("OMDAICharacter") or {}) do
     pcall(function()
       if not pawn:IsValid() then return end
       local name = pawn:GetFName():ToString()
+      live[name] = true
       if name:find("Wisp") or S.walkDone[name] then return end
       local c = pawn.Controller
       if not c or not c:IsValid() then return end
@@ -891,6 +911,10 @@ local function PathOrcs()
         Log("pathstart log capped")
       end
     end)
+  end
+  -- M3: a walkDone entry of a pawn that is no longer valid is dropped.
+  for name in pairs(S.walkDone) do
+    if not live[name] then S.walkDone[name] = nil end
   end
 end
 
@@ -1116,6 +1140,7 @@ local function ResetWorld(worldKey, name, key)
   S.postgame = false
   S.pawnPrints = 0
   S.walkers, S.walkDone = {}, {}
+  S.starts = nil -- M3: the start points are scanned again for the new world
   S.lastStatus, S.lastTraps = nil, nil
   -- #70: the error and pathstart caps are per world.
   S.errLogs = 0

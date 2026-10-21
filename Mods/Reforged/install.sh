@@ -80,6 +80,8 @@ install)
   for w in "${waves[@]}"; do
     [ -f "$w" ] && files+=("Mods/Reforged/waves/$(basename "$w")")
   done
+  # Build version (#104 M3): a release root holds VERSION at its top. A repo install has none, so nothing is copied.
+  [ -f VERSION ] && files+=("Mods/Reforged/VERSION")
 
   run mkdir -p "$WIN/Mods/Reforged/waves"
   if [ "$yes" = --yes ]; then
@@ -102,6 +104,7 @@ install)
   run cp "$M/ue4ss/Reforged/Scripts/custom_map.lua" "$WIN/ue4ss/Mods/Reforged/Scripts/custom_map.lua"
   run cp "$M/ue4ss/Reforged/Scripts/reforged_gate.dll" "$WIN/ue4ss/Mods/Reforged/Scripts/reforged_gate.dll"
   for w in "${waves[@]}"; do [ -f "$w" ] && run cp "$w" "$WIN/Mods/Reforged/waves/$(basename "$w")"; done
+  [ -f VERSION ] && run cp VERSION "$WIN/Mods/Reforged/VERSION"
   for p in "${paks[@]}"; do
     if [ -f "$p" ]; then
       run mkdir -p "$PAKS"

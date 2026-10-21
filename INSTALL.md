@@ -1,4 +1,4 @@
-# Install Endless Reforged 0.2.1
+# Install Endless Reforged 0.2.2
 
 **Tested on:** Linux Mint 22, Steam Proton Experimental, game build RobotUE4
 4.27.1, single-player Endless. **Windows is not tested.**
@@ -67,7 +67,9 @@ use another mod that installs `dwmapi.dll`, remove that mod first.
    If it does, start the game again.
 2. Open the file `OMD/Binaries/Win64/ue4ss/UE4SS.log` in the game folder.
 3. Find a line that starts with `[Reforged] wave director ready`. The mod writes
-   it when it loads.
+   it when it loads. The lines `[Reforged] version=` (the installed release) and
+   `[Reforged] build-check known=true` (the mod knows this game build) help with a
+   bug report.
 4. The main menu shows **Play** and **Options**.
 
 ## Windows
@@ -91,7 +93,9 @@ To update, run `start.bat` again. To remove the mod, double-click
 ### Install by hand
 
 1. Close the game.
-2. Copy these files from the release into the game folder
+2. Make the empty folder `OMD\Binaries\Win64\Mods\Reforged\` if it does not exist.
+   The mod saves its settings there.
+3. Copy these files from the release into the game folder
    `OMD\Binaries\Win64\`:
 
    | From the release | To `OMD\Binaries\Win64\` |
@@ -107,9 +111,8 @@ To update, run `start.bat` again. To remove the mod, double-click
    | Not in the release (written by the gate at run time) | `ue4ss\Mods\Reforged\Scripts\reforged_gate.log` |
    | `Mods\Reforged\ue4ss\Reforged\waves\*.json` | `Mods\Reforged\waves\` |
    | `Mods\Reforged\paks\*.pak` (three packs: `zz_ReforgedWarScenarios_P.pak` adds the War Scenario and custom-map rows to the Endless list; `zz_WellThatsOrcward_P.pak` and `zz_ServantEntrance_P.pak` are the custom maps) | `..\..\Content\Paks\Mods\` (the folder `OMD\Content\Paks\Mods\`) |
+   | `VERSION` (the file at the top of the release; the mod logs the version and commit at start) | `Mods\Reforged\VERSION` |
 
-3. Make the empty folder `OMD\Binaries\Win64\Mods\Reforged\` if it does not exist.
-   The mod saves its settings there.
 4. Start the game. Do the checks in "Check the install" above.
 
 Windows does not need the Steam launch option.
@@ -142,7 +145,7 @@ Your settings stay in `OMD/Binaries/Win64/Mods/Reforged/settings.json`.
 
 The uninstall keeps the files that the mod writes while it runs: `settings.json`,
 `settings.json.bad` (only after a bad settings file), `endless-mode.txt`,
-`watch.jsonl`, `watch.prev.jsonl` and `ue4ss/UE4SS.log`. To remove them too,
+`watch.jsonl`, `watch.prev.jsonl` and `ue4ss/UE4SS.log`. The two watch files exist only when the developer watch stream is on. To remove them too,
 delete the folder `OMD/Binaries/Win64/Mods/Reforged/` and the file
 `OMD/Binaries/Win64/ue4ss/UE4SS.log`.
 
@@ -150,6 +153,7 @@ delete the folder `OMD/Binaries/Win64/Mods/Reforged/` and the file
 
 | Problem | Check |
 |---|---|
+| `[Reforged] build-check known=false` in the log | The game was updated after this release. Reforged keeps working with some features off. Wait for a new mod release. |
 | No `[Reforged]` lines and no `ue4ss/UE4SS.log` | Linux: the Steam launch option is missing or has a typo. |
 | The game crashes at the first start | Start it again. This happens once after an install or an update. |
 | The game does not start after a game update | Uninstall the mod. The game update can break UE4SS. |

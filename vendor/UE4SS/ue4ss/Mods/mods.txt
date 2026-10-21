@@ -1,6 +1,6 @@
-CheatManagerEnablerMod : 1
-ConsoleCommandsMod : 1
-ConsoleEnablerMod : 1
+CheatManagerEnablerMod : 0
+ConsoleCommandsMod : 0
+ConsoleEnablerMod : 0
 SplitScreenMod : 0
 LineTraceMod : 0
 BPML_GenericFunctions : 1

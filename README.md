@@ -1,6 +1,6 @@
 # Endless Reforged: a rebuilt Endless mode for Orcs Must Die! 3
 
-**Version 0.2.1** · single-player · tested on Linux with Steam Proton
+**Version 0.2.2** · single-player · tested on Linux with Steam Proton
 
 Endless Reforged is a mod for *Orcs Must Die! 3* (Steam App ID 1522820). It adds a new
 Endless mode next to the stock one. In Reforged Endless, the mod builds every
@@ -155,8 +155,8 @@ To remove the mod on Linux, close the game and run
 - DLC maps stay locked if you do not own the DLC.
 - If you move the Rift to a place that enemies cannot walk to (for example the
   top of a tower), the enemies stop before it or the game removes them.
-- The mod is made for Endless maps. If you turn off the start screen and play a
-  campaign War Scenario with the mode set to Reforged, the mod changes its waves too.
+- The mod acts only on Endless maps. On a campaign, weekly or DLC campaign map it does not
+  change the waves, the difficulty or the Rift, but it still blocks score uploads.
 - The first game start after an install or an update can crash. Start the
   game again.
 - The mod loads its scripts only when the game starts. Restart the game after
@@ -164,6 +164,9 @@ To remove the mod on Linux, close the game and run
 - The start screen replaces the stock main menu. The campaign is not on it.
 - "Use Modifiers with Classic" is off by default. If you turn it on, the extra
   enemies can stay into the build break.
+- The mod checks the game build at start. After a game update it turns off the
+  Reforged features that depend on the old build (the wave hold, the break gate
+  and the Moneybags rewards) until a new mod release supports the new build.
 - A game update can break the mod. Remove the mod if the game does not start
   after an update.
 
