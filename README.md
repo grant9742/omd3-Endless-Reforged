@@ -43,7 +43,7 @@ every Endless mode.
 
 | Maps | What they are |
 |---|---|
-| **Well That's Orcward** | A new map: one long corridor from the orc gate to the Rift. This is just a test map |
+| **Well That's Orcward** | A new map: one long corridor from the orc gate to the Rift. |
 | **Servant Entrance** | A Backrooms map. An orc has returned from the Backrooms with poorly drawn maps: this one is the layout of the *Orcs Must Die! 2* map. |
 | The 7 War Scenario maps | The stock War Scenario maps, as Endless maps. In Reforged they have a boss every 5 rounds and their own wave size. |
 
@@ -104,7 +104,26 @@ not tested. UE4SS 3.0.1 does not work with this mod.
 
 ## Install
 
-Read [INSTALL.md](INSTALL.md). The short form for Linux:
+Read [INSTALL.md](INSTALL.md) for the full steps. The short forms are below.
+
+### Windows
+
+1. Download `Reforged-<version>.zip` from the Releases page and extract it.
+2. Close the game.
+3. Double-click `start.bat` in the extracted folder. It finds the game in your
+   Steam libraries, also on other drives. If it does not find the game, paste
+   the game folder path (the folder that contains `OMD`) and press Enter, or
+   drag the game folder onto `start.bat`.
+4. Start the game from Steam. Windows does not need a Steam launch option. The
+   first start after an install can crash. Start it again.
+
+To update, run `start.bat` again. To remove the mod, close the game and
+double-click `uninstall.bat`. It deletes only the files that the install added.
+
+`start.bat` and `uninstall.bat` were tested on Windows 10. The mod in the game is
+not yet tested on Windows; please report the result if you try it.
+
+### Linux (Steam Proton)
 
 1. Set the Steam launch option for the game:
    `WINEDLLOVERRIDES="dwmapi=n,b" %command%`
@@ -115,7 +134,8 @@ Read [INSTALL.md](INSTALL.md). The short form for Linux:
    ```
 3. Start the game. The first start after an install can crash. Start it again.
 
-To remove the mod, close the game and run `Mods/Reforged/install.sh rollback --yes`.
+To remove the mod on Linux, close the game and run
+`Mods/Reforged/install.sh rollback --yes`.
 
 ## Controls
 
@@ -130,7 +150,8 @@ To remove the mod, close the game and run `Mods/Reforged/install.sh rollback --y
 
 ## Known limits
 
-- Tested only on Linux Mint 22 with Proton. Windows is not tested.
+- Tested in the game only on Linux Mint 22 with Proton. On Windows, the install
+  and uninstall scripts are tested; the mod in the game is not.
 - Single-player only.
 - No scores go to the leaderboards. The mod sets game integrity to 0 on every
   map, so the game does not save best scores or upload leaderboard scores while
