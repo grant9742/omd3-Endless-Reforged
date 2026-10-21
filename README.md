@@ -43,7 +43,7 @@ every Endless mode.
 
 | Maps | What they are |
 |---|---|
-| **Well That's Orcward** | A new map: one long corridor from the orc gate to the Rift. |
+| **Well That's Orcward** | A new map: one long corridor from the orc gate to the Rift. This is just a test map |
 | **Servant Entrance** | A Backrooms map. An orc has returned from the Backrooms with poorly drawn maps: this one is the layout of the *Orcs Must Die! 2* map. |
 | The 7 War Scenario maps | The stock War Scenario maps, as Endless maps. In Reforged they have a boss every 5 rounds and their own wave size. |
 
