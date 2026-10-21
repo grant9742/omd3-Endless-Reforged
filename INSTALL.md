@@ -1,4 +1,4 @@
-# Install Endless Reforged 0.2.0
+# Install Endless Reforged 0.2.1
 
 **Tested on:** Linux Mint 22, Steam Proton Experimental, game build RobotUE4
 4.27.1, single-player Endless. **Windows is not tested.**

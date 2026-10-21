@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.1 (2026-10-21)
+
+### Fixed
+
+- Moving the Rift on a War Scenario map no longer leaves the enemies standing
+  at the closed inner gates. On these maps, enemies keep the stock lanes, break
+  the gates as in the stock game, and then go to the new Rift. On the other
+  maps, enemies still take a direct route to the new Rift.
+- A second Rift move before the first wave plans from the stock lanes again.
+
+### Known limits
+
+- If you move the Rift to a place that enemies cannot walk to, the enemies stop
+  before it or the game removes them. Move the Rift only to a floor that
+  enemies can reach.
+
 ## 0.2.0 (2026-10-21)
 
 ### Added

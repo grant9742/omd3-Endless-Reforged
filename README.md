@@ -1,6 +1,6 @@
 # Endless Reforged: a rebuilt Endless mode for Orcs Must Die! 3
 
-**Version 0.2.0** · single-player · tested on Linux with Steam Proton
+**Version 0.2.1** · single-player · tested on Linux with Steam Proton
 
 Endless Reforged is a mod for *Orcs Must Die! 3* (Steam App ID 1522820). It adds a new
 Endless mode next to the stock one. In Reforged Endless, the mod builds every
@@ -22,8 +22,13 @@ every file that the install added.
 ### Move the Rift
 
 Before the first wave of a map, press **F7** (or **LB + RB** on a controller)
-to move the Rift to where you stand. Enemies then take a direct route to the
-new Rift. You respawn at that place. Stand on the ground when you press it.
+to move the Rift to where you stand. You respawn at that place. Stand on the
+ground when you press it.
+
+On most maps, enemies then take a direct route to the new Rift. On the War
+Scenario maps, which have closed inner gates, enemies keep the stock lanes,
+break the gates as in the stock game, and then go to the new Rift. Move the Rift
+only to a floor that enemies can walk to (see Known limits).
 
 ### Two Endless modes
 
@@ -157,6 +162,8 @@ To remove the mod on Linux, close the game and run
   map, so the game does not save best scores or upload leaderboard scores while
   the mod is installed. Lifetime stats and achievements are not blocked.
 - DLC maps stay locked if you do not own the DLC.
+- If you move the Rift to a place that enemies cannot walk to (for example the
+  top of a tower), the enemies stop before it or the game removes them.
 - The mod is made for Endless maps. If you turn off the start screen and play a
   campaign War Scenario with the mode set to Reforged, the mod changes its waves too.
 - The first game start after an install or an update can crash. Start the
@@ -164,8 +171,8 @@ To remove the mod on Linux, close the game and run
 - The mod loads its scripts only when the game starts. Restart the game after
   an update.
 - The start screen replaces the stock main menu. The campaign is not on it.
-- In Classic with "Use Modifiers with Classic" on, the extra enemies can stay
-  into the build break.
+- "Use Modifiers with Classic" is off by default. If you turn it on, the extra
+  enemies can stay into the build break.
 - A game update can break the mod. Remove the mod if the game does not start
   after an update.
 

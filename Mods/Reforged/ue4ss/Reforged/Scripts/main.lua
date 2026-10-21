@@ -1975,6 +1975,275 @@ function RiftRewire()
   return points, branches, failed
 end
 
+-- Lane-keeping rewire (#101). Pure: no game calls, so the director tests run it.
+-- graph = { nodes = { [idx] = { next = { idx, ... }, start = bool, x = n, y = n, z = n } }, endIdx = idx }.
+-- rift = { X, Y, Z }. Returns { anchors = { idx, ... }, changes = { { idx, branch, newIdx }, ... }, starts, reached, unreached }.
+-- Each start has its own anchor: the node that the start reaches (not the end) with the least weighted distance to
+-- rift (dz counts 3 times). A start that reaches no such node is unreached. Two starts can share an anchor; it is
+-- listed once in anchors. changes redirect each branch that leads out of the anchors' lanes to the first branch that
+-- stays on them. Each anchor's own branches go to endIdx. Branches to unknown nodes stay.
+function RiftLanePlan(graph, rift)
+  local nodes, endIdx = graph.nodes, graph.endIdx
+  local plan = { anchors = {}, changes = {}, starts = 0, reached = 0, unreached = 0 }
+  local order = {}
+  for idx in pairs(nodes) do order[#order + 1] = idx end
+  table.sort(order)
+  local isAnchor = {}
+  for _, s in ipairs(order) do
+    if nodes[s].start == true then
+      plan.starts = plan.starts + 1
+      local reach, stack = { [s] = true }, { s }
+      while #stack > 0 do
+        local i = table.remove(stack)
+        for _, j in ipairs(nodes[i].next) do
+          if nodes[j] ~= nil and not reach[j] then reach[j] = true; stack[#stack + 1] = j end
+        end
+      end
+      local best, bestD = nil, nil
+      for _, idx in ipairs(order) do
+        local nd = nodes[idx]
+        if reach[idx] and idx ~= endIdx and #nd.next > 0 and nd.x ~= nil then
+          local dx, dy, dz = nd.x - rift.X, nd.y - rift.Y, nd.z - rift.Z
+          local d = dx * dx + dy * dy + (3 * dz) * (3 * dz)
+          if bestD == nil or d < bestD then bestD = d; best = idx end
+        end
+      end
+      if best == nil then
+        plan.unreached = plan.unreached + 1
+      else
+        plan.reached = plan.reached + 1
+        if not isAnchor[best] then
+          isAnchor[best] = true
+          plan.anchors[#plan.anchors + 1] = best
+        end
+      end
+    end
+  end
+  if #plan.anchors == 0 then return plan end
+  -- Reverse links, then a reverse search from every anchor: toA holds every node that reaches an anchor.
+  local prev = {}
+  for _, idx in ipairs(order) do
+    for _, j in ipairs(nodes[idx].next) do
+      prev[j] = prev[j] or {}
+      table.insert(prev[j], idx)
+    end
+  end
+  local toA, st = {}, {}
+  for _, a in ipairs(plan.anchors) do toA[a] = true; st[#st + 1] = a end
+  while #st > 0 do
+    local j = table.remove(st)
+    for _, i in ipairs(prev[j] or {}) do
+      if not toA[i] then toA[i] = true; st[#st + 1] = i end
+    end
+  end
+  for _, idx in ipairs(order) do
+    local nd = nodes[idx]
+    if toA[idx] and not isAnchor[idx] then
+      local firstIn = nil
+      for _, j in ipairs(nd.next) do
+        if toA[j] then firstIn = j; break end
+      end
+      for b, j in ipairs(nd.next) do
+        if firstIn ~= nil and nodes[j] ~= nil and not toA[j] then
+          plan.changes[#plan.changes + 1] = { idx = idx, branch = b, newIdx = firstIn }
+        end
+      end
+    end
+  end
+  for _, a in ipairs(plan.anchors) do
+    for b in ipairs(nodes[a].next) do
+      plan.changes[#plan.changes + 1] = { idx = a, branch = b, newIdx = endIdx }
+    end
+  end
+  return plan
+end
+
+-- Stock lane links (#101 S1, release 0.2.1). LANE_STOCK holds every readable point's out-links, saved before the first
+-- lane rewire of a map. Key = path name .. "|" .. PointIndex (names and numbers, no UObjects). A key read twice, or a
+-- point with an unreadable link, is saved as false and is not restored. ReforgedMapLeave sets LANE_STOCK to nil.
+-- Pure helper for the game calls below: returns the key and the link count of one point, or nil.
+function RiftLaneKey(p)
+  local okK, key = pcall(function() return tostring(p.ParentPath:GetFullName()) end)
+  local okI, idx = pcall(function() return p.PointIndex end)
+  local okN, n = pcall(function() return #p.NextPoints end)
+  if not (okK and okI and okN and type(idx) == "number" and type(n) == "number") then return nil end
+  return key .. "|" .. idx, n
+end
+
+-- Reads every valid point's links and returns the saved copy. Every game call is in pcall.
+function RiftLaneStockSave(all)
+  local saved = {}
+  for _, p in ipairs(all) do
+    local okV, valid = pcall(function() return p:IsValid() == true end)
+    if okV and valid then
+      local sk, n = RiftLaneKey(p)
+      if sk ~= nil then
+        if saved[sk] ~= nil then
+          saved[sk] = false
+        else
+          local nxt, okAll = {}, true
+          for b = 1, n do
+            local okB, bi = pcall(function() return p.NextPoints[b].PointIndex end)
+            if okB and type(bi) == "number" then nxt[b] = bi else okAll = false end
+          end
+          saved[sk] = okAll and { next = nxt } or false
+        end
+      end
+    end
+  end
+  return saved
+end
+
+-- Writes the saved links back to the points on the map and reads each one back. Returns restored, failed.
+-- A point whose saved copy is missing, false, or has a different link count is not written (its links count as failed
+-- only when the copy has the point and the count differs).
+function RiftLaneStockRestore(all)
+  local restored, failed = 0, 0
+  for _, p in ipairs(all) do
+    local okV, valid = pcall(function() return p:IsValid() == true end)
+    if okV and valid then
+      local sk, n = RiftLaneKey(p)
+      local st = sk ~= nil and LANE_STOCK[sk] or nil
+      if st then
+        if n ~= #st.next then
+          failed = failed + #st.next
+        else
+          for b, want in ipairs(st.next) do
+            local okW = pcall(function() p.NextPoints[b].PointIndex = want end)
+            local okR, got = pcall(function() return p.NextPoints[b].PointIndex end)
+            if okW and okR and got == want then restored = restored + 1 else failed = failed + 1 end
+          end
+        end
+      end
+    end
+  end
+  return restored, failed
+end
+
+-- Lane mode (#101). Plans each path that has exactly one end point (RiftLanePlan) and writes the changes to the
+-- branches. A write counts as rewired only when it reads back. Before the plan, the stock links are saved (first
+-- lane rewire of a map) or written back (later rewires), so every plan starts from the stock lanes (S1).
+-- A path with a duplicate or unreadable point, or with 0 or 2+ ends, is skipped and counted in skipped.
+-- Every game call is in pcall. anchors is "none" or "p<k>:<idx,...>;..." where k numbers the paths (1, 2, ...).
+-- Returns { anchors = text, anchorCount, rewired, failed, starts, reached, unreached, skipped, restored }.
+function RiftRewireLanes(riftLoc)
+  local out = { anchors = "none", anchorCount = 0, rewired = 0, failed = 0, starts = 0, reached = 0, unreached = 0,
+    skipped = 0, restored = 0 }
+  local okF, all = pcall(FindAllOf, "OMDPathPoint")
+  if not okF or type(all) ~= "table" then return out end
+  if LANE_STOCK == nil then
+    LANE_STOCK = RiftLaneStockSave(all)
+  else
+    out.restored, out.failed = RiftLaneStockRestore(all)
+  end
+  local groups, keys = {}, {}
+  for _, p in ipairs(all) do
+    local okV, valid = pcall(function() return p:IsValid() == true end)
+    if okV and valid then
+      local okK, key = pcall(function() return tostring(p.ParentPath:GetFullName()) end)
+      if not okK then
+        out.failed = out.failed + 1
+      else
+        local g = groups[key]
+        if g == nil then
+          g = { nodes = {}, ends = {}, actors = {}, bad = false }
+          groups[key] = g
+          keys[#keys + 1] = key
+        end
+        local okI, idx = pcall(function() return p.PointIndex end)
+        local okN, n = pcall(function() return #p.NextPoints end)
+        if not (okI and okN and type(idx) == "number" and type(n) == "number") then
+          g.bad = true
+          out.failed = out.failed + 1
+        else
+          if g.nodes[idx] ~= nil then g.bad = true end
+          local nxt, okNx = {}, true
+          for b = 1, n do
+            local okB, bi = pcall(function() return p.NextPoints[b].PointIndex end)
+            if okB and type(bi) == "number" then nxt[b] = bi else okNx = false end
+          end
+          if not okNx then g.bad = true end
+          local okSt, st = pcall(function() return p.bIsStartPoint == true end)
+          local loc = RiftActorLoc(p)
+          g.nodes[idx] = { next = nxt, start = okSt and st == true,
+            x = loc and loc.X, y = loc and loc.Y, z = loc and loc.Z }
+          g.actors[idx] = p
+          if n == 0 then g.ends[#g.ends + 1] = idx end
+        end
+      end
+    end
+  end
+  local parts = {}
+  for k, key in ipairs(keys) do
+    local g = groups[key]
+    if g.bad or #g.ends ~= 1 then
+      out.skipped = out.skipped + 1
+    else
+      local plan = RiftLanePlan({ nodes = g.nodes, endIdx = g.ends[1] }, riftLoc)
+      out.starts = out.starts + plan.starts
+      out.reached = out.reached + plan.reached
+      out.unreached = out.unreached + plan.unreached
+      if #plan.anchors > 0 then
+        parts[#parts + 1] = "p" .. k .. ":" .. table.concat(plan.anchors, ",")
+        out.anchorCount = out.anchorCount + #plan.anchors
+      end
+      for _, ch in ipairs(plan.changes) do
+        local p = g.actors[ch.idx]
+        local okW = pcall(function() p.NextPoints[ch.branch].PointIndex = ch.newIdx end)
+        local okR, got = pcall(function() return p.NextPoints[ch.branch].PointIndex end)
+        if okW and okR and got == ch.newIdx then out.rewired = out.rewired + 1
+        else out.failed = out.failed + 1 end
+      end
+    end
+  end
+  if #parts > 0 then out.anchors = table.concat(parts, ";") end
+  return out
+end
+
+-- Interior gate test (#101). An interior gate is a valid, closed (bIsOpen ~= true), attackable door whose class name
+-- contains "Door_Interior". The class name is read with GetClass():GetFName():ToString(). Exterior doors
+-- (BP_Door_Exterior_*, BP_Door_Forcefield*, BP_WSForceFieldDoor*) never count. Spawner StartingDoor is not read.
+-- Door classes: OMDDoor and the BP_Door_Interior_* classes (a class with no instances is skipped).
+-- A failed read skips that one object and counts it in info.skipped. The check does not stop.
+-- Returns count, ok, info. info has doors (unique doors read) and skipped.
+-- ok is false only when OMDDoor cannot be listed. The caller then keeps the direct route (today's behavior).
+function RiftInteriorGateCount()
+  local info = { doors = 0, skipped = 0 }
+  local seen, count = {}, 0
+  for _, cls in ipairs({ "OMDDoor", "BP_Door_Interior_Base_C", "BP_Door_Interior_3W_C", "BP_Door_Interior_4W_C" }) do
+    local okF, found = pcall(FindAllOf, cls)
+    if cls == "OMDDoor" and not okF then return 0, false, info end
+    for _, d in ipairs((okF and type(found) == "table" and found) or {}) do
+      local okV, valid = pcall(function() return d:IsValid() == true end)
+      if not okV then
+        info.skipped = info.skipped + 1
+      elseif valid then
+        local okN, full = pcall(function() return d:GetFullName() end)
+        if not okN then
+          info.skipped = info.skipped + 1
+        else
+          full = tostring(full)
+          if not seen[full] then
+            seen[full] = true
+            local okC, name = pcall(function() return d:GetClass():GetFName():ToString() end)
+            local okA, att = pcall(function() return d.bIsAttackable == true end)
+            local okO, open = pcall(function() return d.bIsOpen == true end)
+            if not (okC and okA and okO) then
+              info.skipped = info.skipped + 1
+            else
+              info.doors = info.doors + 1
+              if string.find(tostring(name), "Door_Interior", 1, true) and att and not open then
+                count = count + 1
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  return count, true, info
+end
+
 -- rift-move target: "player" or {X,Y,Z}. Moves the first valid Rift and each end point. Reports through RiftMoveReport.
 -- source is "cmd" (default, the developer command) or "key" (F7). Returns the result text.
 function RiftMove(target, source)
@@ -2022,16 +2291,43 @@ function RiftMove(target, source)
   else res.result = "partial" end
   RiftMoveReport(res)
   if res.result == "ok" then
-    -- After a good move, live enemies take a direct route to the new end point (RiftRouteStep).
-    RIFT_ROUTE.on = true
-    RIFT_ROUTE.endPoint = routeEnd
-    RIFT_ROUTE.done = {}
-    -- The lane graph goes to the new end point first, so the behavior tree keeps the direct route.
-    local okRW, rwP, rwB, rwF = pcall(RiftRewire)
-    if not okRW then rwP, rwB, rwF = 0, 0, 0 end
-    print(string.format("[Reforged] rift-rewire points=%d branches=%d failed=%d", rwP, rwB, rwF))
-    WatchEmit("rift-rewire", { points = rwP, branches = rwB, failed = rwF })
-    pcall(RiftRouteStep)
+    -- #101: a level with an interior gate keeps the stock lanes (lane mode). Other levels take the direct route.
+    local okGC, gates, gatesOk, gInfo = pcall(RiftInteriorGateCount)
+    local laneMode = okGC == true and gatesOk == true and gates > 0
+    if type(gInfo) ~= "table" then gInfo = { doors = 0, skipped = 0 } end
+    print(string.format("[Reforged] rift-gates count=%d doors=%d skipped=%d mode=%s",
+      (okGC and gatesOk and gates) or 0, gInfo.doors or 0, gInfo.skipped or 0,
+      laneMode and "lane" or "direct"))
+    local lanesOn = false
+    if laneMode then
+      RIFT_ROUTE.on = false
+      RIFT_ROUTE.endPoint = nil
+      RIFT_ROUTE.done = {}
+      local okRL, lr = pcall(RiftRewireLanes, res.read or T)
+      if not okRL or type(lr) ~= "table" then
+        lr = { anchors = "none", anchorCount = 0, rewired = 0, failed = 0, starts = 0, reached = 0, unreached = 0,
+          skipped = 0, restored = 0 }
+      end
+      -- M1: no anchor at all gives no lane route, so the direct route below runs (mode lane-fallback).
+      lanesOn = lr.anchorCount > 0
+      local laneLog = lanesOn and "lane" or "lane-fallback"
+      print(string.format("[Reforged] rift-move lanes mode=%s anchors=%s rewired=%d starts=%d unreached=%d skipped=%d restored=%d",
+        laneLog, lr.anchors, lr.rewired, lr.starts, lr.unreached, lr.skipped, lr.restored))
+      WatchEmit("rift-route", { mode = laneLog, anchors = lr.anchors, rewired = lr.rewired, failed = lr.failed,
+        starts = lr.starts, unreached = lr.unreached, skipped = lr.skipped, restored = lr.restored })
+    end
+    if not lanesOn then
+      -- After a good move, live enemies take a direct route to the new end point (RiftRouteStep).
+      RIFT_ROUTE.on = true
+      RIFT_ROUTE.endPoint = routeEnd
+      RIFT_ROUTE.done = {}
+      -- The lane graph goes to the new end point first, so the behavior tree keeps the direct route.
+      local okRW, rwP, rwB, rwF = pcall(RiftRewire)
+      if not okRW then rwP, rwB, rwF = 0, 0, 0 end
+      print(string.format("[Reforged] rift-rewire points=%d branches=%d failed=%d mode=direct", rwP, rwB, rwF))
+      WatchEmit("rift-rewire", { points = rwP, branches = rwB, failed = rwF, mode = "direct" })
+      pcall(RiftRouteStep)
+    end
     -- The next player pawn (a respawn) goes to P, where the player stood.
     local okPK, pkey = pcall(function() local pw = WatchHurtContext(); if pw then return PawnKey(pw) end return nil end)
     RIFT_RESPAWN.on = true
@@ -2115,7 +2411,7 @@ function RiftRouteStep()
     local total = 0
     for _ in pairs(RIFT_ROUTE.done) do total = total + 1 end
     print(string.format("[Reforged] rift-route routed=%d failed=%d total=%d", routed, failed, total))
-    WatchEmit("rift-route", { routed = routed, failed = failed, total = total })
+    WatchEmit("rift-route", { routed = routed, failed = failed, total = total, mode = "direct" })
   end
 end
 
@@ -12499,6 +12795,7 @@ do
     for i = #goblins, 1, -1 do goblins[i] = nil end
     CSPAWN_POINT_CACHE = {}
     RIFT_ROUTE.on, RIFT_ROUTE.endPoint = false, nil
+    LANE_STOCK = nil
     RIFT_RESPAWN.on, RIFT_RESPAWN.P, RIFT_RESPAWN.rift = false, nil, nil
     pcall(AnchorNewMap)
     TICK_HOLD, TICK_HOLD_AUTO_ON, TICK_HOLD_UNTIL = false, false, 0
