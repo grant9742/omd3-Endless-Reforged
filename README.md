@@ -91,14 +91,6 @@ the Endless enemies.
 The main menu shows **Play** and **Options**. **Play** opens the Endless map
 list and starts the map that you pick.
 
-### Test mode
-
-Press **F7** in the Endless map screen to turn test mode on or off. With test
-mode on, the mode box shows `TEST MODE: ON`, and the level-load popup shows
-`TEST MODE`. In a match, test mode keeps the Rift points at 1000 and turns off
-the Go Breaks, so you can try traps and maps without losing. Test mode is off at
-every game start.
-
 ## Requirements
 
 - *Orcs Must Die! 3* from Steam, started once.
@@ -148,7 +140,6 @@ To remove the mod on Linux, close the game and run
 |---|---|---|
 | F6 | Endless map screen | Change the Endless mode (Classic, Reforged). |
 | F5 | Endless map screen | Turn wave modifiers on or off for the current mode. |
-| F7 | Endless map screen | Turn test mode on or off (see "Test mode"). |
 | F7 | In a match, before the first wave | Move the Rift to you. |
 | LB + RB | In a match, before the first wave | Move the Rift to you (controller). |
 | G | In a match | Start the next round (stock key). |
